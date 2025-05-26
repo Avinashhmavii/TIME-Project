@@ -6,3 +6,4 @@ openai
 docx2txt
 SpeechRecognition 
 PyAudio
+opencv-python
