@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: time-project
+    env: python
+    repo: https://github.com/Avinashhmavii/TIME-Project
+    branch: main
+    buildCommand: |
+      apt-get update && apt-get install -y portaudio19-dev
+      pip install -r requirements.txt
+    startCommand: python app.py  # Replace 'app.py' with your Flask app's entry point
+    pythonVersion: "3.11.11"
+    autoDeploy: true
