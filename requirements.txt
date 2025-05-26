@@ -1,0 +1,8 @@
+flask
+pdfplumber
+python-docx
+python-dotenv
+openai
+docx2txt
+SpeechRecognition 
+PyAudio

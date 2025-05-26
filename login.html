@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Interviewer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, #1e3c72, #2a5298);
+            color: #333;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 400px;
+            width: 100%;
+            background: #ffffff;
+            border-radius: 20px;
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+            padding: 40px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        h1 {
+            color: #2a5298;
+            text-align: center;
+            font-size: 2em;
+            margin-bottom: 30px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .form-section {
+            background: #f8fafc;
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid #e2e8f0;
+        }
+
+        label {
+            font-size: 1.1em;
+            color: #4b5563;
+            margin-bottom: 8px;
+            display: block;
+        }
+
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 10px;
+            font-size: 1.1em;
+            background: #f8fafc;
+            margin: 10px 0;
+            transition: border-color 0.3s ease;
+        }
+
+        input[type="text"]:focus, input[type="password"]:focus {
+            border-color: #2a5298;
+            outline: none;
+        }
+
+        button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(45deg, #2a5298, #1e3c72);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            margin-top: 20px;
+        }
+
+        button:hover {
+            background: linear-gradient(45deg, #1e3c72, #2a5298);
+            transform: translateY(-2px);
+        }
+
+        #error-text {
+            color: #dc2626;
+            font-size: 1em;
+            margin-top: 10px;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+            }
+            h1 {
+                font-size: 1.8em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Login</h1>
+        <div class="form-section">
+            <label for="username">Username:</label>
+            <input type="text" id="username" placeholder="Enter your username" required>
+            <label for="password">Password:</label>
+            <input type="password" id="password" placeholder="Enter your password" required>
+            <button onclick="login()">Login</button>
+            <p id="error-text"></p>
+        </div>
+    </div>
+
+    <script>
+        async function login() {
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value.trim();
+            const errorText = document.getElementById('error-text');
+
+            if (!username || !password) {
+                errorText.textContent = 'Please enter both username and password.';
+                return;
+            }
+
+            try {
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    sessionStorage.setItem('allowed', data.allowed);
+                    window.location.href = '/';
+                } else {
+                    errorText.textContent = data.error;
+                }
+            } catch (error) {
+                errorText.textContent = 'Error logging in. Please try again.';
+            }
+        }
+
+        document.getElementById('password').addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                login();
+            }
+        });
+    </script>
+</body>
+</html>
