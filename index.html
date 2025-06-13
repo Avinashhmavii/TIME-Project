@@ -443,9 +443,6 @@
 </nav>
 
 
-
-
-
         <section id="start-section" class="section">
             <div class="grid-container">
                 <div class="card">
@@ -568,6 +565,14 @@
                 </div>
                 
                 <div id="reply-text" class="reply" style="display: none;"></div>
+                <div id="feedback-box" class="feedback" style="display: none;">
+                    <label for="feedback-input"><strong>Your Feedback on this Question:</strong></label>
+                    <textarea id="feedback-input" placeholder="Share your thoughts about this question..."></textarea>
+                    <button onclick="submitFeedback()" class="btn-outline">
+                           <i class="fas fa-comment-dots"></i> Submit Feedback
+                    </button>
+                </div>
+
             </div>
         </section>
 
@@ -576,6 +581,13 @@
                 <h2><i class="fas fa-clipboard-check"></i> Interview Summary</h2>
                 <div id="evaluations"></div>
                 <div id="overall-score" class="overall-score"></div>
+                <div id="feedback-box" class="feedback">
+    <label for="feedback-input"><strong>Your Feedback about the Interview Experience:</strong></label>
+    <textarea id="feedback-input" placeholder="We value your input..."></textarea>
+    <button onclick="submitFeedback()" class="btn-outline">
+        <i class="fas fa-comment-dots"></i> Submit Feedback
+    </button>
+</div>
             </div>
         </section>
     </div>
@@ -878,6 +890,8 @@
                 document.getElementById('answer-input').value = '';
                 document.getElementById('reply-text').textContent = '';
                 document.getElementById('reply-text').style.display = 'none';
+                document.getElementById('feedback-box').style.display = 'block';
+
 
 
                 document.getElementById('submit-btn').style.display = useVoice ? 'none' : 'inline-block';
@@ -972,19 +986,43 @@
                     }
 
                     const evaluationsDiv = document.getElementById('evaluations');
-                    evaluationsDiv.innerHTML = '';
-                    if (data.evaluations && Array.isArray(data.evaluations)) {
-                        data.evaluations.forEach((evalItem) => {
-                            const block = document.createElement('div');
-                            block.className = 'evaluation-block';
-                            block.innerHTML = `
-                                <p class="question">${evalItem.question}</p>
-                                <p><strong>Ans:</strong> ${evalItem.answer}</p>
-                                <p class="feedback">${evalItem.evaluation.replace('[AI Evaluation Complete] ', '')}</p>
-                                <p class="score"><strong>Score:</strong> ${evalItem.score}/10</p>`;
-                            evaluationsDiv.appendChild(block);
-                        });
-                    }
+evaluationsDiv.innerHTML = '';
+
+if (data.evaluations && Array.isArray(data.evaluations)) {
+    data.evaluations.forEach((evalItem) => {
+        const block = document.createElement('div');
+        block.className = 'evaluation-block';
+
+        block.innerHTML = `
+            <p class="question"><strong>Q:</strong> ${evalItem.question}</p>
+            <p><strong>Ans:</strong> ${evalItem.answer}</p>
+            <p class="feedback">${evalItem.evaluation.replace('[AI Evaluation Complete] ', '')}</p>
+            <p class="score"><strong>Score:</strong> ${evalItem.score}/10</p>
+
+            <div class="feedback">
+                <label><strong>Your Feedback on this Question:</strong></label>
+                <textarea class="feedback-textarea" data-question="${evalItem.question}" placeholder="Share your thoughts about this question..."></textarea>
+            </div>
+        `;
+
+        evaluationsDiv.appendChild(block);
+    });
+    await fetch('/submit_evaluations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ evaluations: data.evaluations })  // send to backend
+});
+
+}
+
+const submitBtn = document.createElement('button');
+submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit All Feedback';
+submitBtn.className = 'btn-outline';
+submitBtn.onclick = submitAllFeedback;
+
+evaluationsDiv.appendChild(submitBtn);
+
+
                     if (data.visual_score_details) {
                         const visualBlock = document.createElement('div');
                         visualBlock.className = 'evaluation-block';
@@ -1018,6 +1056,8 @@
                     document.getElementById('progress-text').textContent = '';
                     document.getElementById('progress-fill').style.width = `${(questionNumber / totalQuestions) * 100}%`;
                     document.getElementById('question-text').textContent = data.current_question;
+                    document.getElementById('feedback-box').style.display = 'block';
+
 
                     if (useVoice) {
                         // AI gives reply, then asks next question, then listens
@@ -1166,6 +1206,75 @@
                 subTrackSection.style.display = 'none';
             }
         }
+
+
+        async function submitFeedback() {
+    const feedback = document.getElementById('feedback-input').value.trim();
+    const questionText = document.getElementById('question-text').textContent;
+
+    if (!feedback) {
+        alert("Please enter feedback before submitting.");
+        return;
+    }
+
+    try {
+        const response = await fetch('/submit_feedback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question: questionText, feedback: feedback })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            alert("Thank you for your feedback!");
+            document.getElementById('feedback-input').value = "";
+            document.getElementById('feedback-box').style.display = 'none';
+        } else {
+            alert("Error submitting feedback: " + result.error);
+        }
+    } catch (error) {
+        console.error("Feedback submission failed:", error);
+        alert("An error occurred while submitting feedback.");
+    }
+}
+
+async function submitAllFeedback() {
+    const feedbackEntries = [];
+
+    document.querySelectorAll('.feedback-textarea').forEach(textarea => {
+        const feedbackText = textarea.value.trim();
+        if (feedbackText) {
+            feedbackEntries.push({
+                question: textarea.dataset.question,
+                feedback: feedbackText
+            });
+        }
+    });
+
+    if (feedbackEntries.length === 0) {
+        alert("Please enter at least one feedback comment.");
+        return;
+    }
+
+    try {
+        const response = await fetch('/submit_bulk_feedback', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ entries: feedbackEntries })
+        });
+
+        const result = await response.json();
+        if (result.success) {
+            alert("Thank you! Your feedback has been submitted.");
+        } else {
+            alert("Submission failed: " + result.error);
+        }
+    } catch (err) {
+        console.error(err);
+        alert("Error submitting feedback.");
+    }
+}
+
 
         function initializeApp(allowedUserType) {
             document.getElementById('app-title').textContent = allowedUserType === 'MBA' ? 'HR Interviewer (MBA)' : 'Banking Interviewer';
