@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from datetime import datetime
 import base64
+import platform
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -142,21 +143,43 @@ def get_openai_response_generic(prompt_messages, temperature=0.7, max_tokens=500
 def capture_initial_frame_data_for_question():
     cap = None
     try:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened(): logging.error("Icebreaker: Failed to open webcam for initial frame."); return None
-        time.sleep(0.5)
+        # Try multiple camera indices (0, 1, 2) to find a working device
+        for index in range(3):
+            logging.info(f"Attempting to open camera at index {index}")
+            cap = cv2.VideoCapture(index)
+            if cap.isOpened():
+                logging.info(f"Camera opened successfully at index {index}")
+                break
+        else:
+            logging.error("Icebreaker: Failed to open any webcam device after trying indices 0-2.")
+            return None
+
+        # Ensure camera is ready
+        time.sleep(1.0)  # Increased delay for Linux compatibility
         ret, frame = cap.read()
-        if not ret or frame is None: logging.warning("Icebreaker: Could not capture initial frame."); return None
+        if not ret or frame is None:
+            logging.warning("Icebreaker: Could not capture initial frame.")
+            return None
         _, buffer = cv2.imencode('.jpg', frame)
         image_data_base64 = base64.b64encode(buffer).decode('utf-8')
         return f"data:image/jpeg;base64,{image_data_base64}"
     except Exception as e_capture:
-        logging.error(f"Icebreaker: Exception during initial frame capture: {e_capture}", exc_info=True); return None
+        logging.error(f"Icebreaker: Exception during initial frame capture: {e_capture}", exc_info=True)
+        if platform.system() == "Linux":
+            logging.info("Running on Linux. Check camera permissions (e.g., /dev/video0) and ensure v4l2loopback or similar is configured.")
+        return None
     finally:
-        if cap: cap.release()
+        if cap:
+            cap.release()
+            logging.info("Camera released after initial frame capture.")
 
 def generate_environment_icebreaker_question(image_data_url):
-    if not client or not image_data_url: logging.warning("Icebreaker: Client or image data missing."); return None
+    if not client:
+        logging.warning("Icebreaker: OpenAI client not available.")
+        return "Your setup looks well-prepared. Are you ready to begin the interview?"
+    if not image_data_url:
+        logging.warning("Icebreaker: No image data provided, using fallback question.")
+        return "Your setup looks well-prepared. Are you ready to begin the interview?"
     try:
         messages = [{"role": "user", "content": [
             {"type": "text", "text": (
@@ -176,14 +199,18 @@ def generate_environment_icebreaker_question(image_data_url):
         ]}]
         response_text = get_openai_response_generic(messages, temperature=0.6, max_tokens=75, model_override="gpt-4o-mini")
         if "Error" in response_text or "OpenAI client not available" in response_text:
-            logging.error(f"Icebreaker: API/client error: {response_text}"); return None
+            logging.error(f"Icebreaker: API/client error: {response_text}")
+            return "Your setup looks well-prepared. Are you ready to begin the interview?"
         question = response_text.strip()
         if question and question.endswith('?') and 3 <= len(question.split()) <= 35:
-            logging.info(f"Icebreaker: Generated formal question: {question}"); return question
+            logging.info(f"Icebreaker: Generated formal question: {question}")
+            return question
         else:
-            logging.warning(f"Icebreaker: Generated question unsuitable: '{question}' (Words: {len(question.split()) if question else 0})"); return None
+            logging.warning(f"Icebreaker: Generated question unsuitable: '{question}' (Words: {len(question.split()) if question else 0})")
+            return "Your setup looks well-prepared. Are you ready to begin the interview?"
     except Exception as e_ice:
-        logging.error(f"Icebreaker: Exception in generation: {e_ice}", exc_info=True); return None
+        logging.error(f"Icebreaker: Exception in generation: {e_ice}", exc_info=True)
+        return "Your setup looks well-prepared. Are you ready to begin the interview?"
 
 def generate_resume_questions(resume_text, job_type, asked_qs_set_normalized_global):
     if not resume_text or resume_text == "Resume content appears to be empty or could not be extracted.":
@@ -390,29 +417,21 @@ def generate_conversational_reply(answer_text, job_type_context):
     ans_summary_for_prompt = answer_text[:100] + ("..." if len(answer_text) > 100 else "")
     ack_resp_text = get_openai_response_generic(
         [{"role": "system", "content": sys_prompt_ack}, {"role": "user", "content": f"Candidate's answer (summary): {ans_summary_for_prompt}"}],
-        temperature=0.75, max_tokens=45 # Increased temp slightly for more human-like, increased tokens for slightly longer thoughts
+        temperature=0.75, max_tokens=45
     )
     if "Error" in ack_resp_text or "OpenAI client not available" in ack_resp_text:
-        # Fallback to simpler, less dynamic replies if API fails
         fallbacks = ["Okay, thank you for that.", "Understood, thanks.", "That's clear, thank you.", "Appreciate the detail."]
-        return fallbacks[hash(answer_text) % len(fallbacks)] # Simple way to vary fallback
-
+        return fallbacks[hash(answer_text) % len(fallbacks)]
     ack_reply = ack_resp_text.strip()
     if not ack_reply:
-        return "Understood." # Default if empty response
-
-    # Ensure it's a statement
+        return "Understood."
     if ack_reply.endswith('?'):
-        ack_reply = ack_reply[:-1] + '.' # Replace trailing question mark
+        ack_reply = ack_reply[:-1] + '.'
     if not re.search(r'[.!?]$', ack_reply):
-        ack_reply += '.' # Add period if no punctuation
-
-    # Double check for any remaining question marks internally (less likely with good prompt but safe)
+        ack_reply += '.'
     if '?' in ack_reply:
         ack_reply = ack_reply.replace('?', '.')
-
     return ack_reply
-
 
 def authenticate_user_db_old(username_auth, password_auth):
     try:
@@ -431,30 +450,64 @@ def analyze_frame_for_visuals(cv_frame):
         gray_frame = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2GRAY)
         cascade_path_cv = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
         if not os.path.exists(cascade_path_cv):
-            logging.error(f"Visual Analysis: Haar cascade file not found at {cascade_path_cv}"); return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time()}
+            logging.error(f"Visual Analysis: Haar cascade file not found at {cascade_path_cv}")
+            return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time(), 'error': 'Cascade file missing'}
         face_cascade_cv = cv2.CascadeClassifier(cascade_path_cv)
         if face_cascade_cv.empty():
-            logging.error("Visual Analysis: Failed to load Haar cascade classifier."); return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time()}
+            logging.error("Visual Analysis: Failed to load Haar cascade classifier.")
+            return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time(), 'error': 'Classifier load failed'}
         faces_detected = face_cascade_cv.detectMultiScale(gray_frame, scaleFactor=1.12, minNeighbors=6, minSize=(120, 120))
         eye_contact_flag = len(faces_detected) > 0
         confidence_val = 2.0
-        if eye_contact_flag: confidence_val = 5.0 + min(3.0, len(faces_detected) * 0.4)
+        if eye_contact_flag:
+            confidence_val = 5.0 + min(3.0, len(faces_detected) * 0.4)
+        else:
+            logging.warning("Visual Analysis: No faces detected in frame.")
+            confidence_val = 1.0  # Lower confidence if no face detected
         brightness_val = np.mean(gray_frame)
         emotion_label_cv = 'neutral'
         if eye_contact_flag:
-            if brightness_val > 145 : emotion_label_cv = 'positive_leaning'
-            elif brightness_val < 65 : emotion_label_cv = 'negative_leaning'
-        return {'eye_contact': eye_contact_flag, 'confidence': round(confidence_val, 1), 'emotion': emotion_label_cv, 'timestamp': time.time()}
+            if brightness_val > 145: 
+                emotion_label_cv = 'positive_leaning'
+            elif brightness_val < 65: 
+                emotion_label_cv = 'negative_leaning'
+        return {
+            'eye_contact': eye_contact_flag,
+            'confidence': round(confidence_val, 1),
+            'emotion': emotion_label_cv,
+            'timestamp': time.time(),
+            'error': None
+        }
     except Exception as e_analyze:
-        logging.error(f"Visual Analysis: Error in analyze_frame_for_visuals: {e_analyze}", exc_info=True); return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time()}
+        logging.error(f"Visual Analysis: Error in analyze_frame_for_visuals: {e_analyze}", exc_info=True)
+        return {
+            'eye_contact': False,
+            'confidence': 1.0,
+            'emotion': 'unknown',
+            'timestamp': time.time(),
+            'error': str(e_analyze)
+        }
 
 def capture_and_analyze_visuals_thread_func():
     global visual_analyses, visual_analysis_thread, interview_context
-    cap_visual = None; logging.info("Visual Analysis Thread: Started.")
+    cap_visual = None
+    logging.info("Visual Analysis Thread: Started.")
     try:
-        cap_visual = cv2.VideoCapture(0)
-        if not cap_visual.isOpened(): logging.error("Visual Analysis Thread: Failed to open webcam."); return
-        last_snapshot_taken_time = 0; snapshot_capture_interval = 30
+        # Try multiple camera indices
+        for index in range(3):
+            logging.info(f"Visual Analysis Thread: Attempting to open camera at index {index}")
+            cap_visual = cv2.VideoCapture(index)
+            if cap_visual.isOpened():
+                logging.info(f"Visual Analysis Thread: Camera opened successfully at index {index}")
+                break
+        else:
+            logging.error("Visual Analysis Thread: Failed to open any webcam device after trying indices 0-2.")
+            if platform.system() == "Linux":
+                logging.info("Visual Analysis Thread: Running on Linux. Check camera permissions (e.g., /dev/video0) and ensure v4l2loopback or similar is configured.")
+            return
+
+        last_snapshot_taken_time = 0
+        snapshot_capture_interval = 30
         while True:
             current_context_active = interview_context
             use_camera_in_context = current_context_active.get('use_camera_feature', False) if current_context_active else False
@@ -464,7 +517,16 @@ def capture_and_analyze_visuals_thread_func():
 
             ret_frame, cv_frame_cap = cap_visual.read()
             if not ret_frame or cv_frame_cap is None:
-                logging.warning("Visual Analysis Thread: Failed to capture frame."); time.sleep(0.25); continue
+                logging.warning("Visual Analysis Thread: Failed to capture frame.")
+                visual_analyses.append({
+                    'eye_contact': False,
+                    'confidence': 1.0,
+                    'emotion': 'unknown',
+                    'timestamp': time.time(),
+                    'error': 'Failed to capture frame'
+                })
+                time.sleep(0.25)
+                continue
             analysis_data = analyze_frame_for_visuals(cv_frame_cap)
             visual_analyses.append(analysis_data)
             current_ts = time.time()
@@ -472,35 +534,54 @@ def capture_and_analyze_visuals_thread_func():
                 dt_str_snap = datetime.now().strftime("%Y%m%d_%H%M%S")
                 snap_filename_va = f"va_snapshot_{dt_str_snap}.jpg"
                 snap_filepath_va = os.path.join('uploads', 'snapshots', snap_filename_va)
-                try: cv2.imwrite(snap_filepath_va, cv_frame_cap); logging.info(f"Visual Analysis Thread: Snapshot saved: {snap_filepath_va}"); last_snapshot_taken_time = current_ts
-                except Exception as e_snap_va: logging.error(f"Visual Analysis Thread: Failed to save snapshot: {e_snap_va}")
-            time.sleep(0.3) # Loop interval
+                try:
+                    cv2.imwrite(snap_filepath_va, cv_frame_cap)
+                    logging.info(f"Visual Analysis Thread: Snapshot saved: {snap_filepath_va}")
+                    last_snapshot_taken_time = current_ts
+                except Exception as e_snap_va:
+                    logging.error(f"Visual Analysis Thread: Failed to save snapshot: {e_snap_va}")
+            time.sleep(0.3)
     except Exception as e_thread_va:
         logging.error(f"Visual Analysis Thread: Exception in main loop: {e_thread_va}", exc_info=True)
     finally:
-        if cap_visual: cap_visual.release()
-        logging.info("Visual Analysis Thread: Terminated and camera released.")
-
+        if cap_visual:
+            cap_visual.release()
+            logging.info("Visual Analysis Thread: Camera released.")
+        logging.info("Visual Analysis Thread: Terminated.")
 
 def calculate_visual_score():
-    if not visual_analyses: return 0.0, "No visual data was captured for scoring."
+    if not visual_analyses:
+        logging.warning("Calculate Visual Score: No visual data available.")
+        return 0.0, "No visual data was captured for scoring."
     try:
         num_samples_va = len(visual_analyses)
-        ec_frames = sum(1 for item in visual_analyses if item.get('eye_contact', False))
-        avg_conf_va = sum(item.get('confidence', 1.0) for item in visual_analyses) / num_samples_va
-        pos_emo_frames = sum(1 for item in visual_analyses if 'positive' in item.get('emotion', ''))
-        ec_ratio_va = ec_frames / num_samples_va
+        valid_samples = [item for item in visual_analyses if item.get('error') is None]
+        if not valid_samples:
+            logging.warning("Calculate Visual Score: No valid visual samples.")
+            return 0.0, "No valid visual data was captured for scoring."
+        ec_frames = sum(1 for item in valid_samples if item.get('eye_contact', False))
+        avg_conf_va = sum(item.get('confidence', 1.0) for item in valid_samples) / len(valid_samples)
+        pos_emo_frames = sum(1 for item in valid_samples if 'positive' in item.get('emotion', ''))
+        ec_ratio_va = ec_frames / len(valid_samples) if valid_samples else 0.0
         conf_norm_va = min(max(avg_conf_va, 0), 10) / 10.0
-        pos_emo_ratio_va = pos_emo_frames / num_samples_va
+        pos_emo_ratio_va = pos_emo_frames / len(valid_samples) if valid_samples else 0.0
         w_ec, w_conf, w_emo = 0.45, 0.35, 0.20
-        score_ec_comp = ec_ratio_va * 10; score_conf_comp = conf_norm_va * 10; score_emo_comp = pos_emo_ratio_va * 10
+        score_ec_comp = ec_ratio_va * 10
+        score_conf_comp = conf_norm_va * 10
+        score_emo_comp = pos_emo_ratio_va * 10
         final_visual_score_val = (score_ec_comp * w_ec) + (score_conf_comp * w_conf) + (score_emo_comp * w_emo)
-        feedback_text_va = (f"Estimated eye contact maintained approximately {round(ec_ratio_va*100)}% of samples. "
-                            f"Average perceived confidence: {round(avg_conf_va,1)}/10. "
-                            f"Positive emotion cues observed in approximately {round(pos_emo_ratio_va*100)}% of samples.")
+        feedback_text_va = (
+            f"Estimated eye contact maintained approximately {round(ec_ratio_va*100)}% of samples. "
+            f"Average perceived confidence: {round(avg_conf_va,1)}/10. "
+            f"Positive emotion cues observed in approximately {round(pos_emo_ratio_va*100)}% of samples."
+        )
         return round(final_visual_score_val, 1), feedback_text_va
-    except ZeroDivisionError: logging.warning("Calculate Visual Score: Division by zero."); return 0.0, "Not enough visual data."
-    except Exception as e_cvs: logging.error(f"Calculate Visual Score: Error: {e_cvs}", exc_info=True); return 0.0, "Error calculating visual score."
+    except ZeroDivisionError:
+        logging.warning("Calculate Visual Score: Division by zero.")
+        return 0.0, "Not enough valid visual data."
+    except Exception as e_cvs:
+        logging.error(f"Calculate Visual Score: Error: {e_cvs}", exc_info=True)
+        return 0.0, "Error calculating visual score."
 
 @app.route('/')
 def index_route():
@@ -533,29 +614,26 @@ def logout_route():
     username_logout = session.get('username', 'User')
     logging.info(f"Logout initiated for user {username_logout}.")
     try:
-        current_ic_ref = interview_context # Get current context
+        current_ic_ref = interview_context
         if current_ic_ref and current_ic_ref.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
             logging.info(f"Logout: Signaling visual analysis thread to stop for {username_logout}.")
-            current_ic_ref['use_camera_feature'] = False # Signal thread to stop
-            visual_analysis_thread.join(timeout=1.5) # Wait a bit longer
+            current_ic_ref['use_camera_feature'] = False
+            visual_analysis_thread.join(timeout=1.5)
             if visual_analysis_thread.is_alive():
                  logging.warning(f"Logout: Visual analysis thread for {username_logout} did not terminate gracefully.")
-            visual_analysis_thread = None # Ensure it's cleared
+            visual_analysis_thread = None
 
-        # Clear session and global states
         session.clear()
         visual_analyses = []
         qna_evaluations = []
-        interview_context = {} # Reset to empty dict or new template
+        interview_context = {}
         logging.info(f"User {username_logout} logged out. Session and global states have been reset.")
         return redirect(url_for('login_html_route'))
     except Exception as e_logout:
         logging.error(f"Error during logout for {username_logout}: {e_logout}", exc_info=True)
-        # Still try to clear session and redirect
         session.clear()
         visual_analysis_thread = None; visual_analyses = []; interview_context = {}; qna_evaluations = []
         return redirect(url_for('login_html_route'))
-
 
 @app.route('/capture_snapshot', methods=['POST'])
 def capture_snapshot_route():
@@ -569,6 +647,18 @@ def capture_snapshot_route():
             snap_ts = datetime.now().strftime("%Y%m%d_%H%M%S_frontend_snap"); snap_fname_fe = f"fe_snapshot_{snap_ts}.jpg"
             snap_fpath_fe = os.path.join('uploads', 'snapshots', snap_fname_fe)
             with open(snap_fpath_fe, "wb") as f_snap: f_snap.write(img_bytes)
+            conn = sqlite3.connect('interview_data.db')
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO snapshots (username, timestamp, image_path)
+                VALUES (?, ?, ?)
+            ''', (
+                session.get('username', 'anonymous'),
+                datetime.now().isoformat(),
+                snap_fpath_fe
+            ))
+            conn.commit()
+            conn.close()
             logging.info(f"Frontend snapshot saved successfully: {snap_fpath_fe}")
             return jsonify({"message": f"Snapshot captured from frontend and saved as {snap_fname_fe}."}), 200
         except ValueError: return jsonify({"error": "Invalid image data URL format for snapshot."}), 400
@@ -585,23 +675,21 @@ def start_interview_route():
     try:
         if 'allowed_user_type' not in session: return jsonify({"error": "Unauthorized. Please log in again."}), 401
         
-        # Reset states for a new interview
         qna_evaluations = []
         visual_analyses = []
-        interview_context = interview_context_template.copy() # Use a fresh copy
+        interview_context = interview_context_template.copy()
         interview_context['questions_already_asked'] = set()
         interview_context['generated_resume_questions_cache'] = []
 
-        # Stop any existing visual analysis thread from a previous session/interview
         if visual_analysis_thread and visual_analysis_thread.is_alive():
             logging.warning("Start Interview: Previous visual analysis thread was active. Signaling it to stop.")
             old_thread = visual_analysis_thread
-            visual_analysis_thread = None # Signal to old thread that it's no longer the main one
+            visual_analysis_thread = None
             if old_thread and old_thread.is_alive():
-                old_thread.join(timeout=0.5) # Give it a moment to stop
+                old_thread.join(timeout=0.5)
                 if old_thread.is_alive():
                     logging.warning("Start Interview: Old visual thread did not stop quickly.")
-        visual_analysis_thread = None # Ensure it's None before potentially starting a new one
+        visual_analysis_thread = None
 
         allowed_user_type_sess = session['allowed_user_type']
         current_use_voice_mode = request.form.get('mode') == 'voice'
@@ -650,14 +738,14 @@ def start_interview_route():
             elif track_form == "school_based":
                 school_data = job_specific_pdf_structure.get('school_based', defaultdict(list))
                 school_qs_track = [q_obj['text'] for q_obj in school_data.get(sub_track_form, [])]
-                if not school_qs_track: school_qs_track = [q_obj['text'] for sub_list in school_data.values() for q_obj in sub_list] # Fallback
+                if not school_qs_track: school_qs_track = [q_obj['text'] for sub_list in school_data.values() for q_obj in sub_list]
                 current_q_list_intermediate = list(interview_context['generated_resume_questions_cache'][:5])
                 for q_school in school_qs_track:
                     if normalize_text(q_school) not in interview_context['questions_already_asked']: current_q_list_intermediate.append(q_school)
             elif track_form == "interest_areas":
                 interest_data = job_specific_pdf_structure.get('interest_areas', defaultdict(list))
                 interest_qs_track = [q_obj['text'] for q_obj in interest_data.get(sub_track_form, [])]
-                if not interest_qs_track: interest_qs_track = [q_obj['text'] for sub_list in interest_data.values() for q_obj in sub_list] # Fallback
+                if not interest_qs_track: interest_qs_track = [q_obj['text'] for sub_list in interest_data.values() for q_obj in sub_list]
                 current_q_list_intermediate = list(interview_context['generated_resume_questions_cache'][:5])
                 for q_interest in interest_qs_track:
                      if normalize_text(q_interest) not in interview_context['questions_already_asked']: current_q_list_intermediate.append(q_interest)
@@ -670,20 +758,20 @@ def start_interview_route():
             elif track_form == "bank_type":
                 bank_type_data = job_specific_pdf_structure.get('bank_type', defaultdict(list))
                 bank_qs_track = [q_obj['text'] for q_obj in bank_type_data.get(sub_track_form, [])]
-                if not bank_qs_track: bank_qs_track = [q_obj['text'] for sub_list in bank_type_data.values() for q_obj in sub_list] # Fallback
+                if not bank_qs_track: bank_qs_track = [q_obj['text'] for sub_list in bank_type_data.values() for q_obj in sub_list]
                 current_q_list_intermediate = list(interview_context['generated_resume_questions_cache'][:5])
                 for q_bank_type in bank_qs_track:
                     if normalize_text(q_bank_type) not in interview_context['questions_already_asked']: current_q_list_intermediate.append(q_bank_type)
             elif track_form == "technical_analytical":
                 tech_ana_data = job_specific_pdf_structure.get('technical_analytical', defaultdict(list))
                 tech_qs_track = [q_obj['text'] for q_obj in tech_ana_data.get(sub_track_form, [])]
-                if not tech_qs_track: tech_qs_track = [q_obj['text'] for sub_list in tech_ana_data.values() for q_obj in sub_list] # Fallback
+                if not tech_qs_track: tech_qs_track = [q_obj['text'] for sub_list in tech_ana_data.values() for q_obj in sub_list]
                 current_q_list_intermediate = list(interview_context['generated_resume_questions_cache'][:5])
                 for q_tech in tech_qs_track:
                     if normalize_text(q_tech) not in interview_context['questions_already_asked']: current_q_list_intermediate.append(q_tech)
 
         final_interview_questions_for_session = []
-        temp_asked_this_specific_list_build = set() # To avoid duplicates within this specific list build
+        temp_asked_this_specific_list_build = set()
         for q_text_final_candidate in current_q_list_intermediate:
             stripped_q_final = strip_numbering(q_text_final_candidate)
             norm_stripped_q_final = normalize_text(stripped_q_final)
@@ -693,7 +781,7 @@ def start_interview_route():
                 temp_asked_this_specific_list_build.add(norm_stripped_q_final)
 
         interview_context['questions_list'] = final_interview_questions_for_session
-        for q_final_sess in final_interview_questions_for_session: # Add these final chosen Qs to global asked set
+        for q_final_sess in final_interview_questions_for_session:
             interview_context['questions_already_asked'].add(normalize_text(q_final_sess))
 
         if not interview_context['questions_list']:
@@ -724,10 +812,10 @@ def start_interview_route():
             logging.error("FATAL: No questions available for interview."); return jsonify({"error": "System could not prepare any questions."}), 500
 
         interview_context['current_q_idx'] = 0
-        listening_active = True # Server perspective
+        listening_active = True
 
         if interview_context['use_camera_feature']:
-            visual_analyses = [] # Reset for new interview
+            visual_analyses = []
             visual_analysis_thread = threading.Thread(target=capture_and_analyze_visuals_thread_func, daemon=True)
             visual_analysis_thread.start()
             logging.info("Visual analysis background thread started.")
@@ -740,7 +828,7 @@ def start_interview_route():
             "question_number": 1,
             "use_voice": current_use_voice_mode,
             "use_camera": interview_context['use_camera_feature'],
-            "listening_active": listening_active if current_use_voice_mode else False # For client
+            "listening_active": listening_active if current_use_voice_mode else False
         })
     except Exception as e_start_interview:
         logging.error(f"Critical error in /start_interview route: {e_start_interview}", exc_info=True)
@@ -750,25 +838,20 @@ def calculate_final_overall_score(current_qna_evaluations, visual_score_0_to_10_
     try:
         qna_max_score_contribution = 90.0; visual_max_score_contribution = 10.0
         actual_qna_score_total = sum(item.get("score", 0) for item in current_qna_evaluations if isinstance(item.get("score"), (int, float)))
-        possible_qna_score_total = len(current_qna_evaluations) * 10 # Assuming each Q evaluated out of 10
-        
-        # Handle case where no Q&A evaluations exist (e.g., interview stopped immediately)
+        possible_qna_score_total = len(current_qna_evaluations) * 10
         if not current_qna_evaluations or possible_qna_score_total == 0:
             qna_percentage_achieved = 0.0
         else:
             qna_percentage_achieved = actual_qna_score_total / possible_qna_score_total
-            
         qna_weighted_contribution = qna_percentage_achieved * qna_max_score_contribution
         visual_weighted_contribution = 0.0
-        if isinstance(visual_score_0_to_10_val, (int, float)) and visual_score_0_to_10_val is not None: # Check not None explicitly
+        if isinstance(visual_score_0_to_10_val, (int, float)) and visual_score_0_to_10_val is not None:
             visual_percentage_achieved = visual_score_0_to_10_val / 10.0
             visual_weighted_contribution = visual_percentage_achieved * visual_max_score_contribution
-            
         final_overall_score_calculated = qna_weighted_contribution + visual_weighted_contribution
         return round(max(0.0, min(100.0, final_overall_score_calculated)), 2)
     except Exception as e_calc_score:
         logging.error(f"Error calculating final overall score: {e_calc_score}", exc_info=True); return 0.0
-
 
 @app.route('/submit_answer', methods=['POST'])
 def submit_answer_route():
@@ -779,15 +862,13 @@ def submit_answer_route():
            not isinstance(interview_context.get('questions_list'), list) or \
            'current_q_idx' not in interview_context:
             logging.error("Submit Answer: Interview context corrupted or not initialized.")
-            # Try to gracefully end if possible, otherwise a generic error
             calculated_final_visual_score, visual_feedback_on_error = (0.0, "N/A (Session error)")
-            if interview_context and interview_context.get('use_camera_feature', False): # Check if interview_context exists
+            if interview_context and interview_context.get('use_camera_feature', False):
                  calculated_final_visual_score, visual_feedback_on_error = calculate_visual_score()
             overall_score_on_error = calculate_final_overall_score(qna_evaluations, calculated_final_visual_score)
             if interview_context and interview_context.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
                 interview_context['use_camera_feature'] = False; visual_analysis_thread.join(timeout=0.7); visual_analysis_thread = None
             return jsonify({"reply": "Critical error with session. Interview ending.", "finished": True, "evaluations": qna_evaluations, "overall_score": overall_score_on_error, "visual_score_details": {"score": calculated_final_visual_score, "feedback": visual_feedback_on_error}, "status": "Error: Session Failure"}), 500
-
 
         if not request.is_json: return jsonify({"error": "Invalid request: JSON expected."}), 400
         data_payload = request.get_json()
@@ -804,10 +885,10 @@ def submit_answer_route():
             if interview_context.get('use_camera_feature', False): calculated_final_visual_score, visual_feedback_on_stop = calculate_visual_score()
             overall_score_on_stop = calculate_final_overall_score(qna_evaluations, calculated_final_visual_score)
             job_description_for_feedback_gen = interview_context.get("current_job_description", f"{session.get('allowed_user_type', 'Candidate')} Profile")
-            for eval_item_on_stop in qna_evaluations: # Ensure feedback for already answered Qs
+            for eval_item_on_stop in qna_evaluations:
                 if not eval_item_on_stop.get('feedback'): eval_item_on_stop['feedback'] = generate_answer_feedback(eval_item_on_stop.get('question', 'Unknown'), eval_item_on_stop.get('answer', ''), job_description_for_feedback_gen)
 
-            listening_active = False # Server state
+            listening_active = False
             if interview_context.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
                 interview_context['use_camera_feature'] = False; visual_analysis_thread.join(timeout=0.7); visual_analysis_thread = None
             return jsonify({"reply": "Interview stopped as per your request.", "finished": True, "evaluations": qna_evaluations, "overall_score": overall_score_on_stop, "visual_score_details": {"score": calculated_final_visual_score, "feedback": visual_feedback_on_stop}, "status": "Disqualified: User Request"})
@@ -862,33 +943,70 @@ def submit_answer_route():
 
         if interview_context['current_q_idx'] < len(interview_context['questions_list']):
             next_question_to_ask_text = interview_context['questions_list'][interview_context['current_q_idx']]
-            listening_active = True # Server state
-            return jsonify({"reply": conversational_ack_reply, "current_question": next_question_to_ask_text, "question_number": interview_context['current_q_idx'] + 1, "total_questions": len(interview_context['questions_list']), "next_question": True, "listening_active": listening_active if current_use_voice_mode else False}) # For client
+            listening_active = True
+            return jsonify({"reply": conversational_ack_reply, "current_question": next_question_to_ask_text, "question_number": interview_context['current_q_idx'] + 1, "total_questions": len(interview_context['questions_list']), "next_question": True, "listening_active": listening_active if current_use_voice_mode else False})
         else:
             logging.info("All questions asked. Interview concluding normally.")
             final_visual_score_val_norm, visual_feedback_text_norm = (0.0, "N/A (Camera not used/error)")
             if interview_context.get('use_camera_feature', False): final_visual_score_val_norm, visual_feedback_text_norm = calculate_visual_score()
             overall_score_val_norm = calculate_final_overall_score(qna_evaluations, final_visual_score_val_norm)
-            for eval_item_norm in qna_evaluations: # Ensure all feedbacks are generated
+            for eval_item_norm in qna_evaluations:
                 if not eval_item_norm.get('feedback'): eval_item_norm['feedback'] = generate_answer_feedback(eval_item_norm.get('question', 'Unknown'), eval_item_norm.get('answer', 'N/A'), job_desc_for_ai)
 
-            listening_active = False # Server state
+            listening_active = False
             if interview_context.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
                 interview_context['use_camera_feature'] = False; visual_analysis_thread.join(timeout=0.7); visual_analysis_thread = None
             return jsonify({"reply": "Thank you for completing the interview.", "finished": True, "evaluations": qna_evaluations, "overall_score": overall_score_val_norm, "visual_score_details": {"score": final_visual_score_val_norm, "feedback": visual_feedback_text_norm}, "status": "Completed Successfully"})
     except Exception as e_submit_ans:
         logging.error(f"Critical error in /submit_answer: {e_submit_ans}", exc_info=True)
-        # Attempt to provide some context even in error
         vis_score_exc, vis_feed_exc = (0.0, "N/A (Exception during submit)")
-        current_ic = interview_context # Avoid NameError if interview_context itself is problematic
+        current_ic = interview_context
         if current_ic and current_ic.get('use_camera_feature'):
             vis_score_exc, vis_feed_exc = calculate_visual_score()
-        overall_score_exc = calculate_final_overall_score(qna_evaluations, vis_score_exc) # Use whatever qna_evaluations has
+        overall_score_exc = calculate_final_overall_score(qna_evaluations, vis_score_exc)
         if current_ic and current_ic.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
             current_ic['use_camera_feature'] = False; visual_analysis_thread.join(timeout=0.7); visual_analysis_thread = None
 
         return jsonify({"error": f"Critical server error: {str(e_submit_ans)}.", "reply": "Unexpected problem processing answer.", "finished": True, "evaluations": qna_evaluations, "overall_score": overall_score_exc, "visual_score_details": {"score": vis_score_exc, "feedback": vis_feed_exc}, "status": "Error: Unhandled Exception"}), 500
 
+@app.route('/submit_feedback', methods=['POST'])
+def submit_feedback():
+    try:
+        data = request.get_json()
+        question = data.get('question')
+        feedback = data.get('feedback')
+
+        if not question or not feedback:
+            return jsonify({'success': False, 'error': 'Incomplete data received.'}), 400
+
+        feedback_entry = f"{datetime.now()} - Question: {question}\nFeedback: {feedback}\n\n"
+        with open('feedback_log.txt', 'a', encoding='utf-8') as f:
+            f.write(feedback_entry)
+
+        return jsonify({'success': True})
+    except Exception as e:
+        logging.error(f"Error saving feedback: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': 'Server error while saving feedback.'}), 500
+
+@app.route('/submit_bulk_feedback', methods=['POST'])
+def submit_bulk_feedback():
+    try:
+        data = request.get_json()
+        entries = data.get('entries', [])
+
+        if not entries:
+            return jsonify({'success': False, 'error': 'No feedback entries received.'}), 400
+
+        with open('bulk_feedback_log.txt', 'a', encoding='utf-8') as f:
+            for entry in entries:
+                question = entry.get('question')
+                feedback = entry.get('feedback')
+                f.write(f"{datetime.now()} - Question: {question}\nFeedback: {feedback}\n\n")
+
+        return jsonify({'success': True})
+    except Exception as e:
+        logging.error(f"Bulk feedback error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': 'Internal error.'}), 500
 
 @app.route('/generate_speech', methods=['POST'])
 def generate_speech_route():
@@ -898,23 +1016,97 @@ def generate_speech_route():
         if not request.is_json: return jsonify({"error": "Invalid request: JSON expected."}), 400
         data_tts = request.get_json(); text_for_speech = data_tts.get('text', ''); voice_model_selection = data_tts.get('voice', 'alloy')
         if not text_for_speech.strip(): return jsonify({"error": "Text for speech required."}), 400
-        supported_openai_voices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer', 'sage'] # Sage is a valid voice for tts-1 as per OpenAI docs
+        supported_openai_voices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer', 'sage']
         final_voice_model = voice_model_selection if voice_model_selection in supported_openai_voices else 'alloy'
-        openai_tts_response = client.audio.speech.create(model="tts-1", voice=final_voice_model, input=text_for_speech, response_format="mp3")
-        logging.info(f"TTS generated for '{text_for_speech[:50]}...' with voice '{final_voice_model}'.")
-        return Response(openai_tts_response.content, mimetype='audio/mp3')
+        logging.info(f"Generating TTS for text: '{text_for_speech[:50]}...' with voice: '{final_voice_model}'")
+        try:
+            openai_tts_response = client.audio.speech.create(
+                model="tts-1", 
+                voice=final_voice_model, 
+                input=text_for_speech, 
+                response_format="mp3",
+                timeout=10  # Set a 10-second timeout
+            )
+            logging.info(f"TTS generated successfully for '{text_for_speech[:50]}...'")
+            return Response(openai_tts_response.content, mimetype='audio/mp3')
+        except TimeoutError as e_timeout:
+            logging.error(f"TTS Timeout Error: Request to OpenAI timed out after 10 seconds: {e_timeout}")
+            return jsonify({"error": "TTS generation timed out. Please try again or proceed without audio."}), 504
+        except Exception as e_openai:
+            logging.error(f"TTS OpenAI Error: {e_openai}", exc_info=True)
+            error_message = f"TTS generation failed: {str(e_openai)}"
+            if hasattr(e_openai, 'response') and e_openai.response:
+                try:
+                    err_content = e_openai.response.json()
+                    error_message = f"TTS generation failed: {err_content.get('error', {}).get('message', str(e_openai))}"
+                except:
+                    pass
+            return jsonify({"error": error_message}), 500
     except Exception as e_tts_route:
-        logging.error(f"TTS Generation Error: {e_tts_route}", exc_info=True)
-        # Check if it's an OpenAI API error that might have more details
-        error_message = f"TTS generation failed: {str(e_tts_route)}"
-        if hasattr(e_tts_route, 'response') and e_tts_route.response:
-            try:
-                err_content = e_tts_route.response.json()
-                error_message = f"TTS generation failed: {err_content.get('error', {}).get('message', str(e_tts_route))}"
-            except: 
-                pass
-        return jsonify({"error": error_message}), 500
+        logging.error(f"TTS Route Error: {e_tts_route}", exc_info=True)
+        return jsonify({"error": f"Server error during TTS processing: {str(e_tts_route)}"}), 500
 
+def init_db():
+    conn = sqlite3.connect('interview_data.db')
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            timestamp TEXT,
+            image_path TEXT
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            question TEXT,
+            answer TEXT,
+            evaluation TEXT,
+            score INTEGER,
+            feedback TEXT,
+            timestamp TEXT
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+@app.route('/submit_evaluations', methods=['POST'])
+def submit_evaluations():
+    try:
+        data = request.get_json()
+        evaluations = data.get('evaluations', [])
+
+        conn = sqlite3.connect('interview_data.db')
+        cursor = conn.cursor()
+
+        for eval in evaluations:
+            cursor.execute('''
+                INSERT INTO evaluations (username, question, answer, evaluation, score, feedback, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                session.get('username', 'anonymous'),
+                eval.get('question'),
+                eval.get('answer'),
+                eval.get('evaluation'),
+                eval.get('score'),
+                eval.get('feedback', ''),
+                datetime.now().isoformat()
+            ))
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({'success': True})
+
+    except Exception as e:
+        logging.error(f"Error saving evaluations: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': 'Internal server error'}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000, host="0.0.0.0")
+    init_db()
+    app.run(debug=True, port=5001, host="0.0.0.0")
