@@ -7,3 +7,5 @@ docx2txt
 SpeechRecognition 
 opencv-python
 gunicorn
+Pillow
+opencv-contrib-python
