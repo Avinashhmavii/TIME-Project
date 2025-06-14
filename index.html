@@ -611,20 +611,19 @@
         function setupSpeechRecognition() {
             if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
                 recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-                recognition.continuous = true; // Keep listening even after a pause in speech
-                recognition.interimResults = true; // Get interim results
+                recognition.continuous = true;
+                recognition.interimResults = true;
                 recognition.maxAlternatives = 1;
 
                 recognition.onstart = () => {
-                    // isListening is already true when recognition.start() is called.
-                    // Status text is also set by startListening()
                     console.log('STT: Recognition started.');
+                    document.getElementById('status-text').textContent = '🎤 Listening... Speak clearly.';
                 };
 
                 recognition.onresult = (event) => {
-                    if (isPaused || isSpeaking) return; // Don't process if paused or bot is speaking
+                    if (isPaused || isSpeaking) return;
 
-                    clearTimeout(silenceTimer); // Reset silence timer on new speech input
+                    clearTimeout(silenceTimer);
 
                     let interim = '', finalThisTurn = '';
                     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -642,45 +641,55 @@
                     }
                     answerInput.value = accumulatedTranscript + interim;
 
-                    // If a final result for this turn is received, start/reset the 10s silence timer
                     if (finalThisTurn.trim().length > 0) {
                         silenceTimer = setTimeout(() => {
-                            if (isListening && !isSpeaking && !isPaused) { // Ensure still in a valid listening state
+                            if (isListening && !isSpeaking && !isPaused) {
                                 console.log('STT: 10s silence detected. Submitting answer.');
                                 programmaticStop = true;
-                                if (recognition) recognition.stop(); // This will trigger onend
+                                if (recognition) recognition.stop();
                                 document.getElementById('status-text').textContent = '🧠 Processing your answer...';
                                 submitAnswer();
                             }
-                        }, 10000); // 10 seconds of silence
+                        }, 10000);
                     }
                 };
 
                 recognition.onerror = (event) => {
                     console.error('STT: onerror fired:', event);
-                    document.getElementById('status-text').textContent = `Speech error: ${event.error}. Please check microphone.`;
-                    isListening = false; // Ensure state reflects error
-                    clearTimeout(silenceTimer);
+                    if (event.error === 'no-speech') {
+                        // Retry recognition after a short delay
+                        setTimeout(() => {
+                            if (isListening && !isSpeaking && !isPaused) {
+                                console.log('STT: Retrying after no-speech error');
+                                try {
+                                    recognition.start();
+                                } catch (e) {
+                                    console.error('STT: Retry failed:', e);
+                                    document.getElementById('status-text').textContent = 'Microphone error. Please check your microphone settings.';
+                                    isListening = false;
+                                }
+                            }
+                        }, 1000);
+                    } else {
+                        document.getElementById('status-text').textContent = `Speech error: ${event.error}. Please check microphone.`;
+                        isListening = false;
+                        clearTimeout(silenceTimer);
+                    }
                 };
 
                 recognition.onend = () => {
                     const wasProgrammaticallyStopped = programmaticStop;
                     if (programmaticStop) {
-                        programmaticStop = false; // Reset flag
+                        programmaticStop = false;
                     }
-                    isListening = false; // Recognition has ended, so not listening anymore
+                    isListening = false;
 
                     if (!wasProgrammaticallyStopped) {
-                        // This means recognition ended unexpectedly (e.g., browser timeout, not our silence timer or explicit stop)
                         console.log('STT: Recognition ended unexpectedly.');
                         if (document.getElementById('status-text').textContent.startsWith('🎤 Listening...')) {
-                             document.getElementById('status-text').textContent = 'Listening session ended.';
+                            document.getElementById('status-text').textContent = 'Listening session ended.';
                         }
-                        // As per requirements, do NOT automatically restart listening.
-                        // The flow must be: bot speaks -> then listening starts.
                     }
-                    // If it was programmatically stopped, the function that called stop()
-                    // (e.g., silence timer -> submitAnswer, or pause) handles the subsequent state and status text.
                 };
             } else {
                 console.warn('STT not supported.');
@@ -693,15 +702,21 @@
         
         function stopCurrentAudioPlayback() {
             if (currentAudio) {
-                currentAudio.pause();
-                currentAudio.onended = null; // Remove event listeners
-                currentAudio.onerror = null;
-                if (currentAudio.src && currentAudio.src.startsWith('blob:')) {
-                    URL.revokeObjectURL(currentAudio.src);
+                try {
+                    currentAudio.pause();
+                    currentAudio.onended = null;
+                    currentAudio.onerror = null;
+                    if (currentAudio.src && currentAudio.src.startsWith('blob:')) {
+                        URL.revokeObjectURL(currentAudio.src);
+                    }
+                    currentAudio.src = '';
+                    currentAudio.load();
+                } catch (e) {
+                    console.error('Error stopping audio:', e);
+                } finally {
+                    currentAudio = null;
+                    isSpeaking = false;
                 }
-                currentAudio.src = ''; 
-                currentAudio.load(); 
-                currentAudio = null;
             }
         }
 
@@ -722,13 +737,13 @@
 
 
         async function speakText(text, callback) {
-            if (isSpeaking) { // If already speaking, queue or manage, for now, just log.
+            if (isSpeaking) {
                 console.warn("TTS: speakText called while already speaking. Ignoring new request.");
-                if (callback) callback(); // Or perhaps an error for the callback
+                if (callback) callback();
                 return;
             }
 
-            stopAllVoiceActivity(true); // Ensure any prior STT/TTS is stopped cleanly. Sets programmaticStop for STT.
+            stopAllVoiceActivity(true);
             
             isSpeaking = true;
             document.getElementById('status-text').textContent = 'Interviewer is speaking...';
@@ -738,7 +753,11 @@
                 const response = await fetch('/generate_speech', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text, voice: document.getElementById('voice-model').value })
+                    body: JSON.stringify({ 
+                        text, 
+                        voice: document.getElementById('voice-model').value,
+                        language: document.getElementById('language').value 
+                    })
                 });
 
                 if (!response.ok) {
@@ -747,37 +766,43 @@
                 }
                 
                 const audioBlob = await response.blob();
-                currentAudio = new Audio(URL.createObjectURL(audioBlob));
+                const audioUrl = URL.createObjectURL(audioBlob);
                 
-                currentAudio.onended = () => {
+                // Create new audio instance
+                const audio = new Audio(audioUrl);
+                currentAudio = audio;
+                
+                // Set up event handlers before playing
+                audio.onended = () => {
                     console.log("TTS: Finished speaking.");
-                    stopCurrentAudioPlayback(); // Clean up audio element
-                    isSpeaking = false;
-                    // Clear "Interviewer is speaking..." only if not immediately followed by "Listening..."
-                    // The callback will often call startListening which sets its own message.
+                    stopCurrentAudioPlayback();
                     if (document.getElementById('status-text').textContent === 'Interviewer is speaking...') {
-                         document.getElementById('status-text').textContent = '';
+                        document.getElementById('status-text').textContent = '';
                     }
                     if (callback) callback();
                 };
-                currentAudio.onerror = (e) => {
+
+                audio.onerror = (e) => {
                     console.error('TTS: Playback error:', e);
                     stopCurrentAudioPlayback();
-                    isSpeaking = false;
                     document.getElementById('status-text').textContent = 'Error playing AI voice.';
-                    if (callback) callback(); // Proceed even if TTS fails, to not hang the interview
+                    if (callback) callback();
                 };
-                currentAudio.play().catch(e => {
-                    console.error('TTS: audio.play() failed:', e);
-                    currentAudio.onerror(e); // Trigger the error handler
-                });
+
+                // Play the audio
+                try {
+                    await audio.play();
+                } catch (playError) {
+                    console.error('TTS: Play failed:', playError);
+                    stopCurrentAudioPlayback();
+                    throw playError;
+                }
 
             } catch (error) {
                 console.error('TTS: API or setup error:', error);
                 document.getElementById('status-text').textContent = `TTS Error: ${error.message.substring(0, 100)}`;
-                stopCurrentAudioPlayback(); // Clean up
-                isSpeaking = false;
-                if (callback) callback(); // Proceed with interview flow
+                stopCurrentAudioPlayback();
+                if (callback) callback();
             }
         }
 
@@ -839,9 +864,16 @@
         async function startInterview() {
             const resumeFile = document.getElementById('resume-file').files[0];
             if (!resumeFile) { alert('Please upload resume.'); return; }
+            
+            // Reset all states
+            stopAllVoiceActivity(true);
+            isSpeaking = false;
+            isListening = false;
+            accumulatedTranscript = '';
+            
             document.getElementById('start-section').style.display = 'none';
             document.getElementById('question-section').style.display = 'block';
-            document.getElementById('reply-text').style.display = 'none'; // Hide reply initially
+            document.getElementById('reply-text').style.display = 'none';
             document.getElementById('status-text').textContent = 'Initializing...';
 
             useVoice = document.querySelector('input[name="mode"]:checked').value === 'voice';
@@ -857,18 +889,83 @@
             formData.append('resume', resumeFile);
             formData.append('use_camera', useCamera.toString());
 
+            // Handle camera setup
             const videoElement = document.getElementById('camera-feed');
             if (useCamera) {
                 try {
-                    cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                    cameraStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            width: { ideal: 1280 },
+                            height: { ideal: 720 },
+                            facingMode: 'user',
+                            brightness: { ideal: 0.5 }
+                        }, 
+                        audio: false 
+                    });
                     videoElement.srcObject = cameraStream;
                     videoElement.style.display = 'block';
-                    if (!isPaused) startFrameAnalysis(); 
+                    
+                    // Wait for video to be ready and adjust brightness
+                    await new Promise((resolve) => {
+                        videoElement.onloadedmetadata = () => {
+                            videoElement.play();
+                            // Apply brightness adjustment
+                            const canvas = document.createElement('canvas');
+                            const ctx = canvas.getContext('2d');
+                            const brightness = 1.2; // Increase brightness by 20%
+                            
+                            const processFrame = () => {
+                                if (!videoElement.srcObject) return;
+                                canvas.width = videoElement.videoWidth;
+                                canvas.height = videoElement.videoHeight;
+                                ctx.filter = `brightness(${brightness})`;
+                                ctx.drawImage(videoElement, 0, 0);
+                                videoElement.srcObject.getVideoTracks()[0].applyConstraints({
+                                    advanced: [{ brightness: brightness }]
+                                });
+                            };
+                            
+                            videoElement.addEventListener('play', () => {
+                                processFrame();
+                            });
+                            resolve();
+                        };
+                    });
+                    
+                    // Capture initial frame for icebreaker
+                    const canvas = document.createElement('canvas');
+                    canvas.width = videoElement.videoWidth;
+                    canvas.height = videoElement.videoHeight;
+                    const ctx = canvas.getContext('2d');
+                    ctx.filter = `brightness(1.2)`; // Apply brightness adjustment
+                    ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                    const imageDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                    
+                    // Send initial frame to generate icebreaker
+                    const initialFrameResponse = await fetch('/capture_initial_frame', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ image_data_url: imageDataUrl })
+                    });
+                    
+                    if (!initialFrameResponse.ok) {
+                        throw new Error('Failed to capture initial frame');
+                    }
+                    
+                    const initialFrameData = await initialFrameResponse.json();
+                    if (initialFrameData.error) {
+                        throw new Error(initialFrameData.error);
+                    }
+                    
+                    // Store icebreaker question for later use
+                    window.icebreakerQuestion = initialFrameData.icebreaker_question;
+                    
+                    if (!isPaused) startFrameAnalysis();
                 } catch (err) {
                     console.error("Camera access error:", err);
                     alert("Camera access failed: " + err.message);
                     videoElement.style.display = 'none';
-                    useCamera = false; 
+                    useCamera = false;
                     stopFrameAnalysis();
                 }
             } else {
@@ -882,17 +979,19 @@
                 if (data.error) throw new Error(data.error);
 
                 totalQuestions = data.total_questions;
-                questionNumber = data.question_number; 
+                questionNumber = data.question_number;
 
-                document.getElementById('progress-text').textContent = ''; 
+                document.getElementById('progress-text').textContent = '';
                 document.getElementById('progress-fill').style.width = `${(questionNumber / totalQuestions) * 100}%`;
-                document.getElementById('question-text').textContent = data.current_question;
+                
+                // Always use icebreaker question first for resume-based interviews
+                const currentQuestion = window.icebreakerQuestion || data.current_question;
+                document.getElementById('question-text').textContent = currentQuestion;
+                
                 document.getElementById('answer-input').value = '';
                 document.getElementById('reply-text').textContent = '';
                 document.getElementById('reply-text').style.display = 'none';
                 document.getElementById('feedback-box').style.display = 'block';
-
-
 
                 document.getElementById('submit-btn').style.display = useVoice ? 'none' : 'inline-block';
                 document.getElementById('pause-btn').style.display = 'inline-block';
@@ -900,8 +999,8 @@
 
                 if (useVoice) {
                     const initialGreeting = questionNumber === 1 ? `Welcome! Here is your first question: ` : `Next question: `;
-                    speakText(`${initialGreeting}${data.current_question}`, () => {
-                        if (!isPaused) { // After speaking, start listening
+                    await speakText(`${initialGreeting}${currentQuestion}`, () => {
+                        if (!isPaused) {
                             startListening();
                         }
                     });
@@ -919,26 +1018,21 @@
                     cameraStream = null;
                 }
                 stopFrameAnalysis();
-                stopAllVoiceActivity(); // Clean up voice states
+                stopAllVoiceActivity();
             }
         }
         
         async function submitAnswer() {
             if (isSpeaking) {
                 console.log("Submit Answer: Blocked, AI is speaking.");
-                return; // Don't submit if AI is currently speaking
+                return;
             }
 
-            // Stop any ongoing listening (e.g., if submit is clicked manually in voice mode before silence timer)
-            // Also stops TTS, though isSpeaking check should prevent overlap.
-            // Mark as intentional stop so onEnd doesn't treat it as unexpected.
-            stopAllVoiceActivity(true); 
+            stopAllVoiceActivity(true);
                                         
             const answer = document.getElementById('answer-input').value.trim();
-            // Status is likely already "Processing..." if called by silence timer.
-            // If called by button, set it now.
             if (document.getElementById('status-text').textContent !== '🧠 Processing your answer...') {
-                 document.getElementById('status-text').textContent = '🧠 Processing your answer...';
+                document.getElementById('status-text').textContent = '🧠 Processing your answer...';
             }
             console.log("Submitting answer:", answer.substring(0,100));
 
@@ -951,7 +1045,11 @@
                 const response = await fetch('/submit_answer', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ answer: answer || "" })
+                    body: JSON.stringify({ 
+                        answer: answer || "",
+                        question_number: questionNumber,
+                        is_icebreaker: questionNumber === 1
+                    })
                 });
                 const data = await response.json();
 
@@ -969,15 +1067,14 @@
                     replyTextDiv.style.display = 'none';
                 }
                 
-                document.getElementById('answer-input').value = ''; // Clear input after submission
-                accumulatedTranscript = ''; // Clear accumulated transcript
+                document.getElementById('answer-input').value = '';
+                accumulatedTranscript = '';
 
                 if (data.finished) {
-                    stopAllVoiceActivity(true); // Ensure everything is stopped
+                    stopAllVoiceActivity(true);
                     document.getElementById('question-section').style.display = 'none';
                     document.getElementById('summary-section').style.display = 'block';
                     document.getElementById('status-text').textContent = 'Interview finished.';
-
 
                     stopFrameAnalysis();
                     if (cameraStream) {
@@ -986,42 +1083,40 @@
                     }
 
                     const evaluationsDiv = document.getElementById('evaluations');
-evaluationsDiv.innerHTML = '';
+                    evaluationsDiv.innerHTML = '';
 
-if (data.evaluations && Array.isArray(data.evaluations)) {
-    data.evaluations.forEach((evalItem) => {
-        const block = document.createElement('div');
-        block.className = 'evaluation-block';
+                    if (data.evaluations && Array.isArray(data.evaluations)) {
+                        data.evaluations.forEach((evalItem) => {
+                            const block = document.createElement('div');
+                            block.className = 'evaluation-block';
 
-        block.innerHTML = `
-            <p class="question"><strong>Q:</strong> ${evalItem.question}</p>
-            <p><strong>Ans:</strong> ${evalItem.answer}</p>
-            <p class="feedback">${evalItem.evaluation.replace('[AI Evaluation Complete] ', '')}</p>
-            <p class="score"><strong>Score:</strong> ${evalItem.score}/10</p>
+                            block.innerHTML = `
+                                <p class="question"><strong>Q:</strong> ${evalItem.question}</p>
+                                <p><strong>Ans:</strong> ${evalItem.answer}</p>
+                                <p class="feedback">${evalItem.evaluation.replace('[AI Evaluation Complete] ', '')}</p>
+                                <p class="score"><strong>Score:</strong> ${evalItem.score}/10</p>
 
-            <div class="feedback">
-                <label><strong>Your Feedback on this Question:</strong></label>
-                <textarea class="feedback-textarea" data-question="${evalItem.question}" placeholder="Share your thoughts about this question..."></textarea>
-            </div>
-        `;
+                                <div class="feedback">
+                                    <label><strong>Your Feedback on this Question:</strong></label>
+                                    <textarea class="feedback-textarea" data-question="${evalItem.question}" placeholder="Share your thoughts about this question..."></textarea>
+                                </div>
+                            `;
 
-        evaluationsDiv.appendChild(block);
-    });
-    await fetch('/submit_evaluations', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ evaluations: data.evaluations })  // send to backend
-});
+                            evaluationsDiv.appendChild(block);
+                        });
+                        await fetch('/submit_evaluations', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ evaluations: data.evaluations })
+                        });
+                    }
 
-}
+                    const submitBtn = document.createElement('button');
+                    submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit All Feedback';
+                    submitBtn.className = 'btn-outline';
+                    submitBtn.onclick = submitAllFeedback;
 
-const submitBtn = document.createElement('button');
-submitBtn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit All Feedback';
-submitBtn.className = 'btn-outline';
-submitBtn.onclick = submitAllFeedback;
-
-evaluationsDiv.appendChild(submitBtn);
-
+                    evaluationsDiv.appendChild(submitBtn);
 
                     if (data.visual_score_details) {
                         const visualBlock = document.createElement('div');
@@ -1032,36 +1127,43 @@ evaluationsDiv.appendChild(submitBtn);
                             <p class="feedback"><strong>Feedback:</strong> ${data.visual_score_details.feedback || 'N/A'}</p>`;
                         evaluationsDiv.appendChild(visualBlock);
                     }
+
                     const overallScoreDiv = document.getElementById('overall-score');
                     overallScoreDiv.innerHTML = `
                         <h3>Overall Score: ${data.overall_score}/100</h3>
                         <p>Weightage: Q&A: 90%, Visuals: 10%</p>`;
                     if (data.status) { 
                         const statusP = document.createElement('p');
-                        statusP.style.textAlign = 'center'; statusP.style.color = 'red';
-                        statusP.style.fontWeight = 'bold'; statusP.style.fontSize = '1.2em';
-                        statusP.style.marginTop = '10px'; statusP.textContent = data.status.toUpperCase();
+                        statusP.style.textAlign = 'center';
+                        statusP.style.color = 'red';
+                        statusP.style.fontWeight = 'bold';
+                        statusP.style.fontSize = '1.2em';
+                        statusP.style.marginTop = '10px';
+                        statusP.textContent = data.status.toUpperCase();
                         overallScoreDiv.prepend(statusP); 
                     }
 
                     if (useVoice) {
                         let endMessage = `The interview is complete. Your overall score is ${data.overall_score} out of 100.`;
                         if (data.status && data.status.toLowerCase().includes("disqualified")) {
-                             endMessage = `The interview has been stopped. Your overall score is ${data.overall_score} out of 100.`;
+                            endMessage = `The interview has been stopped. Your overall score is ${data.overall_score} out of 100.`;
                         }
-                        speakText(endMessage, null); // Speak final message, no further listening
+                        await speakText(endMessage, null);
                     }
 
-                } else if (data.current_question) { // Check for current_question for next step
+                } else if (data.current_question) {
                     document.getElementById('progress-text').textContent = '';
                     document.getElementById('progress-fill').style.width = `${(questionNumber / totalQuestions) * 100}%`;
                     document.getElementById('question-text').textContent = data.current_question;
                     document.getElementById('feedback-box').style.display = 'block';
 
-
                     if (useVoice) {
-                        // AI gives reply, then asks next question, then listens
-                        speakText(`${data.reply || 'Okay.'} Next question: ${data.current_question}`, () => {
+                        const reply = data.reply || 'Okay.';
+                        const nextQuestion = data.current_question;
+                        const isFollowUp = data.is_follow_up;
+                        const questionPrefix = isFollowUp ? 'Follow-up question: ' : 'Next question: ';
+                        
+                        await speakText(`${reply} ${questionPrefix}${nextQuestion}`, () => {
                             if (!isPaused) {
                                 startListening();
                             }
@@ -1070,7 +1172,6 @@ evaluationsDiv.appendChild(submitBtn);
                         document.getElementById('status-text').textContent = 'Please type your answer.';
                     }
                 } else {
-                     // Fallback if data.finished is false but no next_question (should ideally not happen)
                     console.error("Submit Answer: No 'finished' flag and no 'next_question'. Interview might be stuck.");
                     document.getElementById('status-text').textContent = 'Error: Received unclear next step from server.';
                 }
@@ -1080,8 +1181,6 @@ evaluationsDiv.appendChild(submitBtn);
                 document.getElementById('status-text').textContent = 'Error submitting answer. Please try again.';
                 if (submitBtn) submitBtn.disabled = false;
                 if (pauseBtn) pauseBtn.disabled = false;
-                // Do not automatically restart listening here to maintain strict flow.
-                // User might need to click submit again (if text) or an error state is present.
             }
         }
 
