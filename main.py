@@ -140,20 +140,8 @@ def get_openai_response_generic(prompt_messages, temperature=0.7, max_tokens=500
         return f"Error: OpenAI API Call Failed - {e_openai}"
 
 def capture_initial_frame_data_for_question():
-    cap = None
-    try:
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened(): logging.error("Icebreaker: Failed to open webcam for initial frame."); return None
-        time.sleep(0.5)
-        ret, frame = cap.read()
-        if not ret or frame is None: logging.warning("Icebreaker: Could not capture initial frame."); return None
-        _, buffer = cv2.imencode('.jpg', frame)
-        image_data_base64 = base64.b64encode(buffer).decode('utf-8')
-        return f"data:image/jpeg;base64,{image_data_base64}"
-    except Exception as e_capture:
-        logging.error(f"Icebreaker: Exception during initial frame capture: {e_capture}", exc_info=True); return None
-    finally:
-        if cap: cap.release()
+    """This function is kept for backward compatibility but is no longer used"""
+    return None
 
 def generate_environment_icebreaker_question(image_data_url):
     if not client or not image_data_url: logging.warning("Icebreaker: Client or image data missing."); return None
@@ -592,7 +580,7 @@ def analyze_visuals_route():
         # Fallback to form data
         if not image_data_url and request.form:
             image_data_url = request.form.get('image_data_url')
-        # Fallback to raw body if it’s base64-like
+        # Fallback to raw body if it's base64-like
         if not image_data_url and len(request.get_data()) > 0:
             raw_body = request.get_data().decode('utf-8', errors='ignore')
             if raw_body.startswith('data:image/') or 'base64,' in raw_body:
@@ -640,9 +628,22 @@ def analyze_visuals_route():
 def start_interview_route():
     global qna_evaluations, current_use_voice_mode, interview_context, listening_active, visual_analysis_thread, visual_analyses
     try:
-        if 'allowed_user_type' not in session: return jsonify({"error": "Unauthorized. Please log in again."}), 401
+        if 'allowed_user_type' not in session:
+            return jsonify({"error": "Unauthorized"}), 401
+            
         qna_evaluations = []
         visual_analyses = []
+        current_use_voice_mode = request.form.get('mode') == 'voice'
+        allowed_user_type_sess = session.get('allowed_user_type', 'MBA')
+        job_key_map = 'mba' if allowed_user_type_sess == 'MBA' else 'bank'
+        track_form = request.form.get('interview_track', 'resume')
+        sub_track_form = request.form.get('sub_track', '')
+        resume_file_form = request.files.get('resume')
+        use_camera_feature = request.form.get('use_camera') == 'true'
+
+        if not resume_file_form:
+            return jsonify({"error": "No resume file provided"}), 400
+
         interview_context = interview_context_template.copy()
         interview_context['questions_already_asked'] = set()
         interview_context['generated_resume_questions_cache'] = []
@@ -656,18 +657,12 @@ def start_interview_route():
                     logging.warning("Start Interview: Old visual thread did not stop quickly.")
             visual_analysis_thread = None
         visual_analysis_thread = None
-        allowed_user_type_sess = session['allowed_user_type']
-        current_use_voice_mode = request.form.get('mode') == 'voice'
-        track_form = request.form.get('interview_track'); sub_track_form = request.form.get('sub_track', '')
-        use_camera_form = request.form.get('use_camera') == 'true'
         interview_context.update({
             'current_interview_track': track_form, 'current_sub_track': sub_track_form,
-            'use_camera_feature': use_camera_form,
+            'use_camera_feature': use_camera_feature,
             'current_job_description': f"{allowed_user_type_sess} Candidate for {track_form} track"
         })
         job_key_map = 'mba' if allowed_user_type_sess == 'MBA' else 'bank'
-        resume_file_form = request.files.get('resume')
-        if not resume_file_form: return jsonify({"error": "Resume file is mandatory."}), 400
         resume_text_content = ""
         temp_resume_path_start = os.path.join('uploads', f"temp_resume_{session.get('username','default')}_{resume_file_form.filename}")
         try:
@@ -747,31 +742,20 @@ def start_interview_route():
             for q_fb_final in interview_context['questions_list']: interview_context['questions_already_asked'].add(normalize_text(q_fb_final))
         interview_context['icebreaker_was_prepended'] = False
         interview_context['prepended_icebreaker_text'] = None
-        if interview_context['use_camera_feature']:
-            logging.info("Camera ON. Attempting to generate formal icebreaker.")
-            initial_frame_b64_ice = capture_initial_frame_data_for_question()
-            if initial_frame_b64_ice:
-                icebreaker_question_text = generate_environment_icebreaker_question(initial_frame_b64_ice)
-                if icebreaker_question_text:
-                    norm_icebreaker_text = normalize_text(icebreaker_question_text)
-                    if norm_icebreaker_text not in interview_context['questions_already_asked']:
-                        interview_context['questions_list'].insert(0, icebreaker_question_text)
-                        interview_context['questions_already_asked'].add(norm_icebreaker_text)
-                        interview_context['icebreaker_was_prepended'] = True
-                        interview_context['prepended_icebreaker_text'] = icebreaker_question_text
-                        logging.info(f"Icebreaker prepended: '{icebreaker_question_text}'")
-                    else: logging.info("Generated icebreaker was duplicate, not adding.")
-                else: logging.info("Failed to generate suitable icebreaker from visual data.")
-            else: logging.info("Failed to capture frame for icebreaker.")
+        
         if not interview_context['questions_list']:
-            logging.error("FATAL: No questions available for interview."); return jsonify({"error": "System could not prepare any questions."}), 500
+            logging.error("FATAL: No questions available for interview.")
+            return jsonify({"error": "System could not prepare any questions."}), 500
+            
         interview_context['current_q_idx'] = 0
         listening_active = True
+        
         if interview_context['use_camera_feature']:
             visual_analyses = []
             visual_analysis_thread = threading.Thread(target=capture_and_analyze_visuals_thread_func, daemon=True)
             visual_analysis_thread.start()
             logging.info("Visual analysis background thread started.")
+            
         logging.info(f"Interview starting for {allowed_user_type_sess}, track '{track_form}'. Total questions in list: {len(interview_context['questions_list'])}")
         return jsonify({
             "message": f"Starting {allowed_user_type_sess} interview. Focus: {track_form}.",
@@ -1120,6 +1104,48 @@ def submit_evaluations():
     except Exception as e:
         logging.error(f"Error saving evaluations: {e}", exc_info=True)
         return jsonify({'success': False, 'error': 'Internal server error'}), 500
+
+@app.route('/capture_initial_frame', methods=['POST'])
+def capture_initial_frame_route():
+    try:
+        if 'allowed_user_type' not in session:
+            return jsonify({"error": "Unauthorized"}), 401
+            
+        data = request.get_json()
+        image_data_url = data.get('image_data_url')
+        if not image_data_url:
+            return jsonify({"error": "No image data received"}), 400
+            
+        try:
+            # Save the image
+            img_header, img_encoded_data = image_data_url.split(",", 1)
+            img_bytes = base64.b64decode(img_encoded_data)
+            snap_ts = datetime.now().strftime("%Y%m%d_%H%M%S_initial")
+            snap_fname = f"initial_snapshot_{snap_ts}.jpg"
+            snap_fpath = os.path.join('uploads', 'snapshots', snap_fname)
+            
+            with open(snap_fpath, "wb") as f_snap:
+                f_snap.write(img_bytes)
+                
+            # Generate icebreaker question
+            icebreaker_question = generate_environment_icebreaker_question(image_data_url)
+            if not icebreaker_question:
+                return jsonify({"error": "Could not generate icebreaker question"}), 500
+                
+            return jsonify({
+                "message": "Initial frame captured successfully",
+                "icebreaker_question": icebreaker_question
+            }), 200
+            
+        except ValueError:
+            return jsonify({"error": "Invalid image data URL format"}), 400
+        except Exception as e_save:
+            logging.error(f"Error processing/saving initial frame: {e_save}", exc_info=True)
+            return jsonify({"error": "Failed to process or save the image data"}), 500
+            
+    except Exception as e_route:
+        logging.error(f"Error in /capture_initial_frame route: {e_route}", exc_info=True)
+        return jsonify({"error": "Server error handling initial frame"}), 500
 
 if __name__ == "__main__":
     init_db()
