@@ -670,10 +670,40 @@
                                 }
                             }
                         }, 1000);
+                    } else if (event.error === 'network') {
+                        console.error('STT: Network error detected');
+                        document.getElementById('status-text').textContent = 'Network error. Please check your internet connection and try again.';
+                        isListening = false;
+                        clearTimeout(silenceTimer);
+                        
+                        // Attempt to recover after network error
+                        setTimeout(() => {
+                            if (!isSpeaking && !isPaused) {
+                                console.log('STT: Attempting to recover from network error');
+                                try {
+                                    recognition.start();
+                                } catch (e) {
+                                    console.error('STT: Recovery failed:', e);
+                                    document.getElementById('status-text').textContent = 'Unable to recover from network error. Please try again later.';
+                                }
+                            }
+                        }, 3000);
                     } else {
                         document.getElementById('status-text').textContent = `Speech error: ${event.error}. Please check microphone.`;
                         isListening = false;
                         clearTimeout(silenceTimer);
+                        
+                        // For other errors, attempt recovery after a delay
+                        setTimeout(() => {
+                            if (!isSpeaking && !isPaused) {
+                                console.log('STT: Attempting to recover from error:', event.error);
+                                try {
+                                    recognition.start();
+                                } catch (e) {
+                                    console.error('STT: Recovery failed:', e);
+                                }
+                            }
+                        }, 2000);
                     }
                 };
 
@@ -779,30 +809,74 @@
                     if (document.getElementById('status-text').textContent === 'Interviewer is speaking...') {
                         document.getElementById('status-text').textContent = '';
                     }
-                    if (callback) callback();
+                    if (callback) {
+                        try {
+                            callback();
+                        } catch (callbackError) {
+                            console.error('TTS: Callback error:', callbackError);
+                        }
+                    }
                 };
 
                 audio.onerror = (e) => {
                     console.error('TTS: Playback error:', e);
                     stopCurrentAudioPlayback();
                     document.getElementById('status-text').textContent = 'Error playing AI voice.';
-                    if (callback) callback();
+                    if (callback) {
+                        try {
+                            callback();
+                        } catch (callbackError) {
+                            console.error('TTS: Callback error:', callbackError);
+                        }
+                    }
                 };
 
-                // Play the audio
-                try {
-                    await audio.play();
-                } catch (playError) {
-                    console.error('TTS: Play failed:', playError);
-                    stopCurrentAudioPlayback();
-                    throw playError;
-                }
+                // Add loadeddata event handler
+                audio.onloadeddata = () => {
+                    console.log("TTS: Audio data loaded, attempting playback.");
+                };
+
+                // Add canplaythrough event handler
+                audio.oncanplaythrough = () => {
+                    console.log("TTS: Audio can play through, starting playback.");
+                };
+
+                // Play the audio with retry logic
+                let playAttempts = 0;
+                const maxPlayAttempts = 3;
+                
+                const attemptPlay = async () => {
+                    try {
+                        await audio.play();
+                        console.log("TTS: Playback started successfully.");
+                    } catch (playError) {
+                        console.error(`TTS: Play attempt ${playAttempts + 1} failed:`, playError);
+                        playAttempts++;
+                        
+                        if (playAttempts < maxPlayAttempts) {
+                            console.log(`TTS: Retrying playback (attempt ${playAttempts + 1}/${maxPlayAttempts})...`);
+                            setTimeout(attemptPlay, 1000); // Wait 1 second before retry
+                        } else {
+                            console.error('TTS: Max play attempts reached, giving up.');
+                            stopCurrentAudioPlayback();
+                            throw new Error('Failed to play audio after multiple attempts');
+                        }
+                    }
+                };
+
+                await attemptPlay();
 
             } catch (error) {
                 console.error('TTS: API or setup error:', error);
                 document.getElementById('status-text').textContent = `TTS Error: ${error.message.substring(0, 100)}`;
                 stopCurrentAudioPlayback();
-                if (callback) callback();
+                if (callback) {
+                    try {
+                        callback();
+                    } catch (callbackError) {
+                        console.error('TTS: Callback error:', callbackError);
+                    }
+                }
             }
         }
 
@@ -893,6 +967,7 @@
             const videoElement = document.getElementById('camera-feed');
             if (useCamera) {
                 try {
+                    // Request camera with specific constraints
                     cameraStream = await navigator.mediaDevices.getUserMedia({ 
                         video: { 
                             width: { ideal: 1280 },
@@ -902,32 +977,14 @@
                         }, 
                         audio: false 
                     });
+                    
                     videoElement.srcObject = cameraStream;
                     videoElement.style.display = 'block';
                     
-                    // Wait for video to be ready and adjust brightness
+                    // Wait for video to be ready
                     await new Promise((resolve) => {
                         videoElement.onloadedmetadata = () => {
                             videoElement.play();
-                            // Apply brightness adjustment
-                            const canvas = document.createElement('canvas');
-                            const ctx = canvas.getContext('2d');
-                            const brightness = 1.2; // Increase brightness by 20%
-                            
-                            const processFrame = () => {
-                                if (!videoElement.srcObject) return;
-                                canvas.width = videoElement.videoWidth;
-                                canvas.height = videoElement.videoHeight;
-                                ctx.filter = `brightness(${brightness})`;
-                                ctx.drawImage(videoElement, 0, 0);
-                                videoElement.srcObject.getVideoTracks()[0].applyConstraints({
-                                    advanced: [{ brightness: brightness }]
-                                });
-                            };
-                            
-                            videoElement.addEventListener('play', () => {
-                                processFrame();
-                            });
                             resolve();
                         };
                     });
@@ -937,15 +994,18 @@
                     canvas.width = videoElement.videoWidth;
                     canvas.height = videoElement.videoHeight;
                     const ctx = canvas.getContext('2d');
-                    ctx.filter = `brightness(1.2)`; // Apply brightness adjustment
+                    ctx.filter = 'brightness(1.2)';
                     ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-                    const imageDataUrl = canvas.toDataURL('image/jpeg', 0.8);
                     
-                    // Send initial frame to generate icebreaker
+                    // Convert to blob for better performance
+                    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+                    const formData = new FormData();
+                    formData.append('image', blob, 'initial_frame.jpg');
+                    
+                    // Send initial frame
                     const initialFrameResponse = await fetch('/capture_initial_frame', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ image_data_url: imageDataUrl })
+                        body: formData
                     });
                     
                     if (!initialFrameResponse.ok) {
@@ -957,13 +1017,15 @@
                         throw new Error(initialFrameData.error);
                     }
                     
-                    // Store icebreaker question for later use
                     window.icebreakerQuestion = initialFrameData.icebreaker_question;
                     
-                    if (!isPaused) startFrameAnalysis();
+                    if (!isPaused) {
+                        startFrameAnalysis();
+                    }
                 } catch (err) {
                     console.error("Camera access error:", err);
                     alert("Camera access failed: " + err.message);
+                    const videoElement = document.getElementById('camera-feed');
                     videoElement.style.display = 'none';
                     useCamera = false;
                     stopFrameAnalysis();
@@ -1121,10 +1183,12 @@
                     if (data.visual_score_details) {
                         const visualBlock = document.createElement('div');
                         visualBlock.className = 'evaluation-block';
+                        const score = data.visual_score_details.score || 0;
+                        const feedback = data.visual_score_details.feedback || 'No visual feedback available';
                         visualBlock.innerHTML = `
                             <h4>Visual Cues Analysis</h4>
-                            <p class="score"><strong>Score (Sim):</strong> ${data.visual_score_details.score !== undefined ? data.visual_score_details.score + '/10' : 'N/A'}</p>
-                            <p class="feedback"><strong>Feedback:</strong> ${data.visual_score_details.feedback || 'N/A'}</p>`;
+                            <p class="score"><strong>Score:</strong> ${score}/10</p>
+                            <p class="feedback"><strong>Feedback:</strong> ${feedback}</p>`;
                         evaluationsDiv.appendChild(visualBlock);
                     }
 
@@ -1163,11 +1227,18 @@
                         const isFollowUp = data.is_follow_up;
                         const questionPrefix = isFollowUp ? 'Follow-up question: ' : 'Next question: ';
                         
-                        await speakText(`${reply} ${questionPrefix}${nextQuestion}`, () => {
-                            if (!isPaused) {
-                                startListening();
-                            }
-                        });
+                        try {
+                            await speakText(`${reply} ${questionPrefix}${nextQuestion}`, () => {
+                                if (!isPaused) {
+                                    startListening();
+                                }
+                            });
+                        } catch (speakError) {
+                            console.error('TTS error in submitAnswer:', speakError);
+                            document.getElementById('status-text').textContent = 'Error with voice mode. Please continue in text mode.';
+                            useVoice = false;
+                            document.getElementById('submit-btn').style.display = 'inline-block';
+                        }
                     } else {
                         document.getElementById('status-text').textContent = 'Please type your answer.';
                     }
@@ -1234,10 +1305,55 @@
             }
         }
 
+        async function captureAndSendFrame() {
+            if (!useCamera || !cameraStream || isPaused || document.hidden) return;
+            
+            const videoElement = document.getElementById('camera-feed');
+            if (!videoElement.srcObject || videoElement.readyState < videoElement.HAVE_ENOUGH_DATA || videoElement.videoWidth === 0) {
+                console.warn('Frame capture: Video not ready');
+                return;
+            }
+
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = videoElement.videoWidth;
+                canvas.height = videoElement.videoHeight;
+                const ctx = canvas.getContext('2d');
+                
+                // Apply brightness adjustment
+                ctx.filter = 'brightness(1.2)';
+                ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                
+                // Convert to blob for better performance
+                const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+                const formData = new FormData();
+                formData.append('image', blob, 'frame.jpg');
+                
+                const response = await fetch('/analyze_visuals', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Frame analysis failed: ${response.status}`);
+                }
+
+                const result = await response.json();
+                if (result.error) {
+                    console.warn('Frame analysis warning:', result.error);
+                }
+            } catch (error) {
+                console.warn('Frame send error:', error.message);
+            }
+        }
+
         function startFrameAnalysis() {
             if (useCamera && cameraStream && !frameAnalysisInterval && !isPaused) {
-                captureAndSendFrame(); 
-                frameAnalysisInterval = setInterval(captureAndSendFrame, 5000); 
+                // Send first frame immediately
+                captureAndSendFrame();
+                // Then set up interval
+                frameAnalysisInterval = setInterval(captureAndSendFrame, 5000);
+                console.log('Frame analysis started');
             }
         }
 
@@ -1245,29 +1361,10 @@
             if (frameAnalysisInterval) {
                 clearInterval(frameAnalysisInterval);
                 frameAnalysisInterval = null;
+                console.log('Frame analysis stopped');
             }
         }
 
-        async function captureAndSendFrame() {
-            if (!useCamera || !cameraStream || isPaused || document.hidden) return; // also check if tab is active
-            const videoElement = document.getElementById('camera-feed');
-            if (!videoElement.srcObject || videoElement.readyState < videoElement.HAVE_ENOUGH_DATA || videoElement.videoWidth === 0) return;
-            const canvas = document.createElement('canvas');
-            canvas.width = videoElement.videoWidth;
-            canvas.height = videoElement.videoHeight;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-            const imageDataUrl = canvas.toDataURL('image/jpeg', 0.7); 
-            try {
-                await fetch('/analyze_visuals', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image_data: imageDataUrl })
-                });
-            } catch (error) {
-                console.warn('Frame send error:', error.message); // Log warning, don't flood user with errors
-            }
-        }
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 stopFrameAnalysis();
