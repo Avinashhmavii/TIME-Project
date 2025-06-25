@@ -39,6 +39,7 @@ listening_active = False
 interview_context = {}
 visual_analysis_thread = None
 visual_analyses = []
+visual_analyses_lock = threading.Lock()
 
 interview_context_template = {
     'questions_list': [], 'current_q_idx': 0, 'previous_answers_list': [], 'scores_list': [],
@@ -144,7 +145,9 @@ def capture_initial_frame_data_for_question():
     return None
 
 def generate_environment_icebreaker_question(image_data_url):
-    if not client or not image_data_url: logging.warning("Icebreaker: Client or image data missing."); return None
+    if not client or not image_data_url:
+        logging.warning("Icebreaker: Client or image data missing.")
+        return None
     try:
         messages = [{"role": "user", "content": [
             {"type": "text", "text": (
@@ -162,16 +165,23 @@ def generate_environment_icebreaker_question(image_data_url):
             )},
             {"type": "image_url", "image_url": {"url": image_data_url, "detail": "low"}}
         ]}]
-        response_text = get_openai_response_generic(messages, temperature=0.6, max_tokens=75, model_override="gpt-4o-mini")
+        
+        response_text = get_openai_response_generic(messages, temperature=0.6, max_tokens=75, model_override="gpt-4-vision-preview")
         if "Error" in response_text or "OpenAI client not available" in response_text:
-            logging.error(f"Icebreaker: API/client error: {response_text}"); return None
+            logging.error(f"Icebreaker: API/client error: {response_text}")
+            return None
+            
         question = response_text.strip()
         if question and question.endswith('?') and 3 <= len(question.split()) <= 35:
-            logging.info(f"Icebreaker: Generated formal question: {question}"); return question
+            logging.info(f"Icebreaker: Generated formal question: {question}")
+            return question
         else:
-            logging.warning(f"Icebreaker: Generated question unsuitable: '{question}' (Words: {len(question.split()) if question else 0})"); return None
+            logging.warning(f"Icebreaker: Generated question unsuitable: '{question}' (Words: {len(question.split()) if question else 0})")
+            return None
+            
     except Exception as e_ice:
-        logging.error(f"Icebreaker: Exception in generation: {e_ice}", exc_info=True); return None
+        logging.error(f"Icebreaker: Exception in generation: {e_ice}", exc_info=True)
+        return None
 
 def generate_resume_questions(resume_text, job_type, asked_qs_set_normalized_global):
     if not resume_text or resume_text == "Resume content appears to be empty or could not be extracted.":
@@ -408,63 +418,73 @@ def authenticate_user_db_old(username_auth, password_auth):
 
 def analyze_frame_for_visuals(cv_frame):
     try:
-        gray_frame = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2GRAY)
-        cascade_path_cv = os.path.join(cv2.data.haarcascades, 'haarcascade_frontalface_default.xml')
-        if not os.path.exists(cascade_path_cv):
-            logging.error(f"Visual Analysis: Haar cascade file not found at {cascade_path_cv}"); return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time()}
-        face_cascade_cv = cv2.CascadeClassifier(cascade_path_cv)
-        if face_cascade_cv.empty():
-            logging.error("Visual Analysis: Failed to load Haar cascade classifier."); return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time()}
-        faces_detected = face_cascade_cv.detectMultiScale(gray_frame, scaleFactor=1.12, minNeighbors=6, minSize=(120, 120))
-        eye_contact_flag = len(faces_detected) > 0
-        confidence_val = 2.0
-        if eye_contact_flag: confidence_val = 5.0 + min(3.0, len(faces_detected) * 0.4)
-        brightness_val = np.mean(gray_frame)
-        emotion_label_cv = 'neutral'
-        if eye_contact_flag:
-            if brightness_val > 145 : emotion_label_cv = 'positive_leaning'
-            elif brightness_val < 65 : emotion_label_cv = 'negative_leaning'
-        return {'eye_contact': eye_contact_flag, 'confidence': round(confidence_val, 1), 'emotion': emotion_label_cv, 'timestamp': time.time()}
-    except Exception as e_analyze:
-        logging.error(f"Visual Analysis: Error in analyze_frame_for_visuals: {e_analyze}", exc_info=True); return {'eye_contact': False, 'confidence': 1.0, 'emotion': 'unknown', 'timestamp': time.time()}
+        if cv_frame is None or cv_frame.size == 0:
+            logging.warning("Visual Analysis: Empty frame received")
+            return {
+                'timestamp': datetime.now().isoformat(),
+                'face_detected': False,
+                'face_count': 0,
+                'brightness': 0,
+                'contrast': 0,
+                'error': 'Empty frame'
+            }
 
-def capture_and_analyze_visuals_thread_func():
-    global visual_analyses, visual_analysis_thread, interview_context
-    cap_visual = None; logging.info("Visual Analysis Thread: Started.")
-    try:
-        cap_visual = cv2.VideoCapture(0)
-        if not cap_visual.isOpened(): logging.error("Visual Analysis Thread: Failed to open webcam."); return
-        last_snapshot_taken_time = 0; snapshot_capture_interval = 30
-        while True:
-            current_context_active = interview_context
-            use_camera_in_context = current_context_active.get('use_camera_feature', False) if current_context_active else False
-            if not use_camera_in_context or visual_analysis_thread != threading.current_thread():
-                logging.info(f"Visual Analysis Thread: Stopping. use_camera_in_context: {use_camera_in_context}, thread_match: {visual_analysis_thread == threading.current_thread()}.")
-                break
-            ret_frame, cv_frame_cap = cap_visual.read()
-            if not ret_frame or cv_frame_cap is None:
-                logging.warning("Visual Analysis Thread: Failed to capture frame."); time.sleep(0.25); continue
-            analysis_data = analyze_frame_for_visuals(cv_frame_cap)
-            visual_analyses.append(analysis_data)
-            current_ts = time.time()
-            if current_context_active.get('use_camera_feature', False) and (current_ts - last_snapshot_taken_time >= snapshot_capture_interval):
-                dt_str_snap = datetime.now().strftime("%Y%m%d_%H%M%S")
-                snap_filename_va = f"va_snapshot_{dt_str_snap}.jpg"
-                snap_filepath_va = os.path.join('uploads', 'snapshots', snap_filename_va)
-                try: cv2.imwrite(snap_filepath_va, cv_frame_cap); logging.info(f"Visual Analysis Thread: Snapshot saved: {snap_filepath_va}"); last_snapshot_taken_time = current_ts
-                except Exception as e_snap_va: logging.error(f"Visual Analysis Thread: Failed to save snapshot: {e_snap_va}")
-            time.sleep(0.3)
-    except Exception as e_thread_va:
-        logging.error(f"Visual Analysis Thread: Exception in main loop: {e_thread_va}", exc_info=True)
-    finally:
-        if cap_visual: cap_visual.release()
-        logging.info("Visual Analysis Thread: Terminated and camera released.")
+        # Convert frame to grayscale
+        gray = cv2.cvtColor(cv_frame, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate brightness and contrast
+        brightness = float(np.mean(gray))
+        contrast = float(np.std(gray))
+        
+        # Detect faces
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        if face_cascade.empty():
+            logging.error("Visual Analysis: Failed to load face cascade classifier")
+            return {
+                'timestamp': datetime.now().isoformat(),
+                'face_detected': False,
+                'face_count': 0,
+                'brightness': brightness,
+                'contrast': contrast,
+                'error': 'Failed to load face detector'
+            }
+        
+        faces = face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(30, 30)
+        )
+        
+        # Initialize analysis result
+        analysis = {
+            'timestamp': datetime.now().isoformat(),
+            'face_detected': len(faces) > 0,
+            'face_count': len(faces),
+            'face_locations': faces.tolist() if len(faces) > 0 else [],
+            'brightness': brightness,
+            'contrast': contrast
+        }
+        
+        logging.debug(f"Visual Analysis: Processed frame - Faces: {len(faces)}, Brightness: {brightness:.2f}, Contrast: {contrast:.2f}")
+        return analysis
+
+    except Exception as e:
+        logging.error(f"Error in analyze_frame_for_visuals: {str(e)}")
+        return {
+            'timestamp': datetime.now().isoformat(),
+            'face_detected': False,
+            'face_count': 0,
+            'brightness': 0,
+            'contrast': 0,
+            'error': str(e)
+        }
 
 def calculate_visual_score():
     if not visual_analyses: return 0.0, "No visual data was captured for scoring."
     try:
         num_samples_va = len(visual_analyses)
-        ec_frames = sum(1 for item in visual_analyses if item.get('eye_contact', False))
+        ec_frames = sum(1 for item in visual_analyses if item.get('face_detected', False))
         avg_conf_va = sum(item.get('confidence', 1.0) for item in visual_analyses) / num_samples_va
         pos_emo_frames = sum(1 for item in visual_analyses if 'positive' in item.get('emotion', ''))
         ec_ratio_va = ec_frames / num_samples_va
@@ -477,8 +497,12 @@ def calculate_visual_score():
                             f"Average perceived confidence: {round(avg_conf_va,1)}/10. "
                             f"Positive emotion cues observed in approximately {round(pos_emo_ratio_va*100)}% of samples.")
         return round(final_visual_score_val, 1), feedback_text_va
-    except ZeroDivisionError: logging.warning("Calculate Visual Score: Division by zero."); return 0.0, "Not enough visual data."
-    except Exception as e_cvs: logging.error(f"Calculate Visual Score: Error: {e_cvs}", exc_info=True); return 0.0, "Error calculating visual score."
+    except ZeroDivisionError: 
+        logging.warning("Calculate Visual Score: Division by zero.")
+        return 0.0, "Not enough visual data."
+    except Exception as e_cvs: 
+        logging.error(f"Calculate Visual Score: Error: {e_cvs}", exc_info=True)
+        return 0.0, "Error calculating visual score."
 
 @app.route('/')
 def index_route():
@@ -568,61 +592,36 @@ def capture_snapshot_route():
 @app.route('/analyze_visuals', methods=['POST'])
 def analyze_visuals_route():
     try:
-        if 'allowed_user_type' not in session:
-            return jsonify({"error": "Unauthorized access."}), 401
-        # Log request details for debugging
-        logging.debug(f"Analyze Visuals Request: Content-Type: {request.content_type}, Headers: {dict(request.headers)}, Form: {request.form}, JSON: {request.get_json(silent=True)}, Raw Body Length: {len(request.get_data())}")
-        image_data_url = None
-        # Try JSON payload first
-        if request.is_json:
-            data = request.get_json()
-            image_data_url = data.get('image_data_url')
-        # Fallback to form data
-        if not image_data_url and request.form:
-            image_data_url = request.form.get('image_data_url')
-        # Fallback to raw body if it's base64-like
-        if not image_data_url and len(request.get_data()) > 0:
-            raw_body = request.get_data().decode('utf-8', errors='ignore')
-            if raw_body.startswith('data:image/') or 'base64,' in raw_body:
-                image_data_url = raw_body
-        if not image_data_url:
-            logging.warning("Analyze Visuals: No valid image_data_url found in JSON, form, or raw body.")
-            return jsonify({"error": "No image data (image_data_url) received."}), 400
-        try:
-            img_header, img_encoded_data = image_data_url.split(",", 1)
-            img_bytes = base64.b64decode(img_encoded_data)
-            snap_ts = datetime.now().strftime("%Y%m%d_%H%M%S_analyze_visuals")
-            snap_fname = f"va_snapshot_{snap_ts}.jpg"
-            snap_fpath = os.path.join('uploads', 'snapshots', snap_fname)
-            with open(snap_fpath, "wb") as f_snap:
-                f_snap.write(img_bytes)
-            conn = sqlite3.connect('interview_data.db')
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO snapshots (username, timestamp, image_path)
-                VALUES (?, ?, ?)
-            ''', (
-                session.get('username', 'anonymous'),
-                datetime.now().isoformat(),
-                snap_fpath
-            ))
-            conn.commit()
-            conn.close()
-            logging.info(f"Visual analysis snapshot saved successfully: {snap_fpath}")
-            return jsonify({
-                "message": f"Visual analysis snapshot saved as {snap_fname}.",
-                "status": "success",
-                "analysis": "Snapshot received (analysis handled by background thread)."
-            }), 200
-        except ValueError:
-            logging.error("Analyze Visuals: Invalid image data URL format.")
-            return jsonify({"error": "Invalid image data URL format."}), 400
-        except Exception as e_save_snap:
-            logging.error(f"Analyze Visuals: Error processing/saving snapshot: {e_save_snap}", exc_info=True)
-            return jsonify({"error": "Failed to process or save the snapshot data."}), 500
-    except Exception as e_analyze_route:
-        logging.error(f"Analyze Visuals: Error in route: {e_analyze_route}", exc_info=True)
-        return jsonify({"error": "Server error handling visual analysis."}), 500
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image file provided'}), 400
+
+        image_file = request.files['image']
+        if not image_file.filename:
+            return jsonify({'error': 'No image file selected'}), 400
+
+        # Read image file
+        image_bytes = image_file.read()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            return jsonify({'error': 'Failed to decode image'}), 400
+
+        # Analyze frame
+        analysis_result = analyze_frame_for_visuals(frame)
+        
+        # Store analysis result
+        with visual_analyses_lock:
+            visual_analyses.append(analysis_result)
+            # Keep only last 10 analyses
+            if len(visual_analyses) > 10:
+                visual_analyses.pop(0)
+
+        return jsonify({'success': True, 'analysis': analysis_result})
+
+    except Exception as e:
+        logging.error(f"Error in analyze_visuals_route: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/start_interview', methods=['POST'])
 def start_interview_route():
@@ -799,11 +798,11 @@ def submit_answer_route():
            not isinstance(interview_context.get('questions_list'), list) or \
            'current_q_idx' not in interview_context:
             logging.error("Submit Answer: Interview context corrupted or not initialized.")
-            calculated_final_visual_score, visual_feedback_on_error = (0.0, "N/A (Session error)")
-            if interview_context and interview_context.get('use_camera_feature', False):
-                calculated_final_visual_score, visual_feedback_on_error = calculate_visual_score()
+            visual_score_result = calculate_visual_score()
+            calculated_final_visual_score = visual_score_result[0]
+            visual_feedback_on_error = visual_score_result[1]
             overall_score_on_error = calculate_final_overall_score(qna_evaluations, calculated_final_visual_score)
-            if interview_context and interview_context.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
+            if interview_context.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
                 interview_context['use_camera_feature'] = False
                 visual_analysis_thread.join(timeout=0.7)
                 visual_analysis_thread = None
@@ -812,7 +811,10 @@ def submit_answer_route():
                 "finished": True,
                 "evaluations": qna_evaluations,
                 "overall_score": overall_score_on_error,
-                "visual_score_details": {"score": calculated_final_visual_score, "feedback": visual_feedback_on_error},
+                "visual_score_details": {
+                    "score": calculated_final_visual_score,
+                    "feedback": visual_feedback_on_error
+                },
                 "status": "Error: Session Failure"
             }), 500
         if not request.is_json:
@@ -825,9 +827,9 @@ def submit_answer_route():
         if user_wants_to_stop:
             user_name_log = session.get('username', 'N/A_User')
             logging.info(f"User '{user_name_log}' requested to stop/end interview. Answer: '{answer_text_from_user}'.")
-            calculated_final_visual_score, visual_feedback_on_stop = (0.0, "N/A (Interview stopped by user)")
-            if interview_context.get('use_camera_feature', False):
-                calculated_final_visual_score, visual_feedback_on_stop = calculate_visual_score()
+            visual_score_result = calculate_visual_score()
+            calculated_final_visual_score = visual_score_result[0]
+            visual_feedback_on_stop = visual_score_result[1]
             overall_score_on_stop = calculate_final_overall_score(qna_evaluations, calculated_final_visual_score)
             job_description_for_feedback_gen = interview_context.get("current_job_description", f"{session.get('allowed_user_type', 'Candidate')} Profile")
             for eval_item_on_stop in qna_evaluations:
@@ -847,15 +849,16 @@ def submit_answer_route():
                 "finished": True,
                 "evaluations": qna_evaluations,
                 "overall_score": overall_score_on_stop,
-                "visual_score_details": {"score": calculated_final_visual_score, "feedback": visual_feedback_on_stop},
+                "visual_score_details": {
+                    "score": calculated_final_visual_score,
+                    "feedback": visual_feedback_on_stop
+                },
                 "status": "Disqualified: User Request"
             })
         current_question_idx_val = interview_context.get('current_q_idx', -1)
         if not (0 <= current_question_idx_val < len(interview_context['questions_list'])):
             logging.error(f"Submit Answer: Invalid current_q_idx ({current_question_idx_val}). List len ({len(interview_context.get('questions_list',[]))}). Ending.")
-            vis_score_idx_err, vis_feed_idx_err = (0.0, "N/A (Q index error)")
-            if interview_context.get('use_camera_feature'):
-                vis_score_idx_err, vis_feed_idx_err = calculate_visual_score()
+            vis_score_idx_err, vis_feed_idx_err = calculate_visual_score()
             overall_score_idx_err = calculate_final_overall_score(qna_evaluations, vis_score_idx_err)
             if interview_context.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
                 interview_context['use_camera_feature'] = False
@@ -933,9 +936,9 @@ def submit_answer_route():
             })
         else:
             logging.info("All questions asked. Interview concluding normally.")
-            final_visual_score_val_norm, visual_feedback_text_norm = (0.0, "N/A (Camera not used/error)")
-            if interview_context.get('use_camera_feature', False):
-                final_visual_score_val_norm, visual_feedback_text_norm = calculate_visual_score()
+            visual_score_result = calculate_visual_score()
+            final_visual_score_val_norm = visual_score_result[0]
+            visual_feedback_text_norm = visual_score_result[1]
             overall_score_val_norm = calculate_final_overall_score(qna_evaluations, final_visual_score_val_norm)
             for eval_item_norm in qna_evaluations:
                 if not eval_item_norm.get('feedback'):
@@ -955,18 +958,18 @@ def submit_answer_route():
                 "finished": True,
                 "evaluations": qna_evaluations,
                 "overall_score": overall_score_val_norm,
-                "visual_score_details": {"score": final_visual_score_val_norm, "feedback": visual_feedback_text_norm},
+                "visual_score_details": {
+                    "score": final_visual_score_val_norm,
+                    "feedback": visual_feedback_text_norm
+                },
                 "status": "Completed Successfully"
             })
     except Exception as e_submit_ans:
         logging.error(f"Critical error in /submit_answer: {e_submit_ans}", exc_info=True)
-        vis_score_exc, vis_feed_exc = (0.0, "N/A (Exception during submit)")
-        current_ic = interview_context
-        if current_ic and current_ic.get('use_camera_feature'):
-            vis_score_exc, vis_feed_exc = calculate_visual_score()
+        vis_score_exc, vis_feed_exc = calculate_visual_score()
         overall_score_exc = calculate_final_overall_score(qna_evaluations, vis_score_exc)
-        if current_ic and current_ic.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
-            current_ic['use_camera_feature'] = False
+        if interview_context and interview_context.get('use_camera_feature', False) and visual_analysis_thread and visual_analysis_thread.is_alive():
+            interview_context['use_camera_feature'] = False
             visual_analysis_thread.join(timeout=0.7)
             visual_analysis_thread = None
         logging.debug(f"Submit Answer Error: Voice mode: {current_use_voice_mode}, Listening active: {listening_active}")
@@ -1108,44 +1111,84 @@ def submit_evaluations():
 @app.route('/capture_initial_frame', methods=['POST'])
 def capture_initial_frame_route():
     try:
-        if 'allowed_user_type' not in session:
-            return jsonify({"error": "Unauthorized"}), 401
-            
-        data = request.get_json()
-        image_data_url = data.get('image_data_url')
-        if not image_data_url:
-            return jsonify({"error": "No image data received"}), 400
-            
-        try:
-            # Save the image
-            img_header, img_encoded_data = image_data_url.split(",", 1)
-            img_bytes = base64.b64decode(img_encoded_data)
-            snap_ts = datetime.now().strftime("%Y%m%d_%H%M%S_initial")
-            snap_fname = f"initial_snapshot_{snap_ts}.jpg"
-            snap_fpath = os.path.join('uploads', 'snapshots', snap_fname)
-            
-            with open(snap_fpath, "wb") as f_snap:
-                f_snap.write(img_bytes)
-                
-            # Generate icebreaker question
-            icebreaker_question = generate_environment_icebreaker_question(image_data_url)
-            if not icebreaker_question:
-                return jsonify({"error": "Could not generate icebreaker question"}), 500
-                
-            return jsonify({
-                "message": "Initial frame captured successfully",
-                "icebreaker_question": icebreaker_question
-            }), 200
-            
-        except ValueError:
-            return jsonify({"error": "Invalid image data URL format"}), 400
-        except Exception as e_save:
-            logging.error(f"Error processing/saving initial frame: {e_save}", exc_info=True)
-            return jsonify({"error": "Failed to process or save the image data"}), 500
-            
-    except Exception as e_route:
-        logging.error(f"Error in /capture_initial_frame route: {e_route}", exc_info=True)
-        return jsonify({"error": "Server error handling initial frame"}), 500
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image file provided'}), 400
+
+        image_file = request.files['image']
+        if not image_file.filename:
+            return jsonify({'error': 'No image file selected'}), 400
+
+        # Read and process the image
+        image_bytes = image_file.read()
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        if frame is None:
+            return jsonify({'error': 'Failed to decode image'}), 400
+
+        # Save the frame
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        frame_filename = f"initial_frame_{timestamp}.jpg"
+        frame_path = os.path.join('uploads', 'snapshots', frame_filename)
+        cv2.imwrite(frame_path, frame)
+
+        # Convert frame to base64 for OpenAI
+        _, buffer = cv2.imencode('.jpg', frame)
+        image_data_url = f"data:image/jpeg;base64,{base64.b64encode(buffer).decode('utf-8')}"
+
+        # Generate icebreaker question
+        icebreaker_question = generate_environment_icebreaker_question(image_data_url)
+        if not icebreaker_question:
+            logging.warning("Failed to generate icebreaker question, using fallback")
+            icebreaker_question = "I see you're ready for the interview. How are you feeling about this opportunity?"
+
+        logging.info(f"Generated icebreaker question: {icebreaker_question}")
+        
+        return jsonify({
+            'success': True,
+            'icebreaker_question': icebreaker_question,
+            'frame_saved': frame_filename
+        })
+
+    except Exception as e:
+        logging.error(f"Error in capture_initial_frame_route: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+def capture_and_analyze_visuals_thread_func():
+    global visual_analyses, visual_analysis_thread, interview_context
+    cap_visual = None; logging.info("Visual Analysis Thread: Started.")
+    try:
+        cap_visual = cv2.VideoCapture(0)
+        if not cap_visual.isOpened(): logging.error("Visual Analysis Thread: Failed to open webcam."); return
+        last_snapshot_taken_time = 0; snapshot_capture_interval = 30
+        while True:
+            current_context_active = interview_context
+            use_camera_in_context = current_context_active.get('use_camera_feature', False) if current_context_active else False
+            if not use_camera_in_context or visual_analysis_thread != threading.current_thread():
+                logging.info(f"Visual Analysis Thread: Stopping. use_camera_in_context: {use_camera_in_context}, thread_match: {visual_analysis_thread == threading.current_thread()}.")
+                break
+            ret_frame, cv_frame_cap = cap_visual.read()
+            if not ret_frame or cv_frame_cap is None:
+                logging.warning("Visual Analysis Thread: Failed to capture frame."); time.sleep(0.25); continue
+            analysis_data = analyze_frame_for_visuals(cv_frame_cap)
+            with visual_analyses_lock:
+                visual_analyses.append(analysis_data)
+                # Keep only last 10 analyses
+                if len(visual_analyses) > 10:
+                    visual_analyses.pop(0)
+            current_ts = time.time()
+            if current_context_active.get('use_camera_feature', False) and (current_ts - last_snapshot_taken_time >= snapshot_capture_interval):
+                dt_str_snap = datetime.now().strftime("%Y%m%d_%H%M%S")
+                snap_filename_va = f"va_snapshot_{dt_str_snap}.jpg"
+                snap_filepath_va = os.path.join('uploads', 'snapshots', snap_filename_va)
+                try: cv2.imwrite(snap_filepath_va, cv_frame_cap); logging.info(f"Visual Analysis Thread: Snapshot saved: {snap_filepath_va}"); last_snapshot_taken_time = current_ts
+                except Exception as e_snap_va: logging.error(f"Visual Analysis Thread: Failed to save snapshot: {e_snap_va}")
+            time.sleep(0.3)
+    except Exception as e_thread_va:
+        logging.error(f"Visual Analysis Thread: Exception in main loop: {e_thread_va}", exc_info=True)
+    finally:
+        if cap_visual: cap_visual.release()
+        logging.info("Visual Analysis Thread: Terminated and camera released.")
 
 if __name__ == "__main__":
     init_db()
